@@ -1,0 +1,9 @@
+# Phase 0 — bộ tối giản. Version đã kiểm tra trên PyPI + build thật, không phỏng đoán.
+duckdb==1.5.5
+boto3==1.43.78
+pandas==3.0.5
+pyarrow==25.0.1
+matplotlib==3.11.1
+
+# Cố tình KHÔNG cài s3fs: nó ghim botocore rất chặt (qua aiobotocore) và xung khắc
+# với boto3 mới. Phase 0 không cần nó — boto3 lo upload, DuckDB tự đọc s3://.

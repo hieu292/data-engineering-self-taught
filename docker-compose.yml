@@ -1,0 +1,76 @@
+# ═══════════════════════════════════════════════════════════════
+#  Databricks Clone — Phase 0: Lát cắt mỏng
+#  Tầng 1 (Object storage) = MinIO   |   Tầng 7 (Notebook) = Jupyter
+#  Sáu tầng còn lại sẽ được thêm dần qua các phase sau.
+# ═══════════════════════════════════════════════════════════════
+
+services:
+
+  # ── Tầng 1: Object storage. Databricks gọi là DBFS, thực chất là S3. ──
+  minio:
+    image: minio/minio:latest
+    container_name: lakehouse-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${MINIO_API_PORT}:9000"      # S3 API — code nói chuyện qua cổng này
+      - "${MINIO_CONSOLE_PORT}:9001"  # Web UI — người xem qua cổng này
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [lakehouse]
+
+  # ── Tạo bucket rồi tự thoát. Chạy một lần, không phải service thường trực. ──
+  minio-init:
+    image: minio/mc:latest
+    container_name: lakehouse-minio-init
+    depends_on:
+      minio: { condition: service_healthy }
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
+      mc mb --ignore-existing local/$$MINIO_BUCKET &&
+      echo '✓ Bucket sẵn sàng: '$$MINIO_BUCKET
+      "
+    networks: [lakehouse]
+
+  # ── Tầng 7: Notebook. Nơi bạn thực sự chạm vào dữ liệu. ──
+  jupyter:
+    build: ./docker/jupyter
+    container_name: lakehouse-jupyter
+    depends_on:
+      minio-init: { condition: service_completed_successfully }
+    environment:
+      # Biến chuẩn AWS — boto3/s3fs/duckdb đều tự đọc, không cần hardcode key trong code
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_ENDPOINT_URL: http://minio:9000
+      AWS_REGION: us-east-1
+      LAKEHOUSE_BUCKET: ${MINIO_BUCKET}
+    ports:
+      - "${JUPYTER_PORT}:8888"
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - ./data:/home/jovyan/data
+    command: >
+      start-notebook.py
+      --IdentityProvider.token='${JUPYTER_TOKEN}'
+      --ServerApp.root_dir=/home/jovyan/work
+    networks: [lakehouse]
+
+volumes:
+  minio-data:
+
+networks:
+  lakehouse:
+    name: lakehouse
