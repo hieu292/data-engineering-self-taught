@@ -190,7 +190,7 @@ Gộp tất cả thành một dự án **kể được thành câu chuyện**:
 |---|---|---|---|
 | 0 · Lát cắt mỏng | ✅ Xong | 2026-08-23 | `notebooks/00_thin_slice.ipynb` |
 | 1 · Storage & file format | ✅ Xong | 2026-08-23 | `notebooks/01_file_formats.ipynb` |
-| 2 · Delta Lake | 🟡 Đang làm | | `notebooks/02_delta_lake.ipynb` |
+| 2 · Delta Lake | ✅ Xong | 2026-08-23 | `notebooks/02_delta_lake.ipynb` |
 | 3 · Spark | ⬜ | | |
 | 4 · Medallion + dbt | ⬜ | | |
 | 5 · Trino + Superset | ⬜ | | |
@@ -251,17 +251,17 @@ Phase 1 không thêm service nào vào `docker-compose.yml`. Đó là chủ ý: 
 
 ### Sáu bước
 
-- [ ] **1 · Năm cách lưu cùng một dữ liệu** — CSV / JSON / Parquet (không nén, Snappy, Zstd).
+- [x] **1 · Năm cách lưu cùng một dữ liệu** — CSV / JSON / Parquet (không nén, Snappy, Zstd).
       Đo byte. Hiểu vì sao Parquet *không nén* đã nhỏ hơn CSV.
-- [ ] **2 · Bấm giờ ba truy vấn** — `count(*)`, một cột, lọc+nhóm. Hiểu **projection pushdown**
+- [x] **2 · Bấm giờ ba truy vấn** — `count(*)`, một cột, lọc+nhóm. Hiểu **projection pushdown**
       và vì sao `count(*)` trên Parquet gần như tức thì.
-- [ ] **3 · Mổ bụng file Parquet** — đọc footer bằng `pyarrow`: row group, column chunk,
+- [x] **3 · Mổ bụng file Parquet** — đọc footer bằng `pyarrow`: row group, column chunk,
       encoding, thống kê min/max. *Nguyên tắc "đọc file thô" của lộ trình.*
-- [ ] **4 · Thứ tự dòng quyết định tốc độ** — cùng dữ liệu, cùng dung lượng: bản xáo trộn
+- [x] **4 · Thứ tự dòng quyết định tốc độ** — cùng dữ liệu, cùng dung lượng: bản xáo trộn
       phải đọc 25/25 row group, bản sắp xếp chỉ đọc 2/25. **Đây chính là Z-ORDER.**
-- [ ] **5 · Partition Hive-style** — `ngay=2024-01-15/` trên tên thư mục. Đọc `EXPLAIN` thấy
+- [x] **5 · Partition Hive-style** — `ngay=2024-01-15/` trên tên thư mục. Đọc `EXPLAIN` thấy
       `Scanning Files: 1/31` — **partition pruning**. Ba tiêu chí chọn cột partition.
-- [ ] **6 · SAI CÓ CHỦ ĐÍCH: small files problem** — partition theo ngày×giờ, đẻ ra hơn
+- [x] **6 · SAI CÓ CHỦ ĐÍCH: small files problem** — partition theo ngày×giờ, đẻ ra hơn
       nghìn file nhỏ, chậm hơn cả chục lần trong khi dung lượng còn *phình ra*. Rồi tự tay
       compaction để chữa — chính là thứ Delta gọi là `OPTIMIZE`.
 
@@ -299,24 +299,24 @@ không cần JVM, khởi động tức thì.
 
 ### Chín bước
 
-- [ ] **1 · Bảng Delta đầu tiên** — nhìn ra storage: chỉ có file Parquet + thư mục `_delta_log/`.
+- [x] **1 · Bảng Delta đầu tiên** — nhìn ra storage: chỉ có file Parquet + thư mục `_delta_log/`.
       **Một bảng Delta chỉ là một thư mục.**
-- [ ] **2 · Mở `_delta_log/` đọc bằng tay** ⭐ *trọng tâm cả phase* — ba action `protocol` /
+- [x] **2 · Mở `_delta_log/` đọc bằng tay** ⭐ *trọng tâm cả phase* — ba action `protocol` /
       `metaData` / `add`. Hiểu: **bảng = tập file mà log nói là thuộc về nó**, không phải
       mọi file trong thư mục. Thống kê min/max được chép sẵn lên log → data skipping ở tầng bảng.
-- [ ] **3 · ACID không cần khoá** — tự tay thử `put-if-absent` (`If-None-Match: *`) trên MinIO:
+- [x] **3 · ACID không cần khoá** — tự tay thử `put-if-absent` (`If-None-Match: *`) trên MinIO:
       writer thứ hai bị `PreconditionFailed`. **Đó là toàn bộ cơ chế khoá của Delta.**
       Kèm demo snapshot isolation.
-- [ ] **4 · Time travel + `RESTORE`** — và vì sao restore không xoá lịch sử (log append-only).
-- [ ] **5 · `MERGE` (upsert)** — sửa 2 dòng nhưng `num_target_rows_copied` = 499.998.
+- [x] **4 · Time travel + `RESTORE`** — và vì sao restore không xoá lịch sử (log append-only).
+- [x] **5 · `MERGE` (upsert)** — sửa 2 dòng nhưng `num_target_rows_copied` = 499.998.
       Hiểu **copy-on-write** và lối thoát *deletion vectors* (merge-on-read).
-- [ ] **6 · Schema evolution** — Delta chặn trước, chỉ cho qua khi khai `schema_mode='merge'`.
+- [x] **6 · Schema evolution** — Delta chặn trước, chỉ cho qua khi khai `schema_mode='merge'`.
       Thêm cột vào bảng 10 TB tốn vài giây vì **schema nằm trong log, không nằm trong file**.
-- [ ] **7 · `OPTIMIZE` + `Z-ORDER`** — chính việc đã làm tay ở Phase 1, nay gói trong transaction.
+- [x] **7 · `OPTIMIZE` + `Z-ORDER`** — chính việc đã làm tay ở Phase 1, nay gói trong transaction.
       Bảng min/max sau Z-ORDER cho thấy mỗi file chỉ ôm một dải `pu_zone` hẹp.
-- [ ] **8 · SAI CÓ CHỦ ĐÍCH: `VACUUM` nuốt time travel** — vacuum retention 0 rồi đọc version
+- [x] **8 · SAI CÓ CHỦ ĐÍCH: `VACUUM` nuốt time travel** — vacuum retention 0 rồi đọc version
       cũ → `FileNotFoundError`. Log còn, dữ liệu mất. Đây là sự cố production rất phổ biến.
-- [ ] **9 · Bằng chứng định dạng mở** — ghi bằng `delta-rs`, đọc bằng `delta_scan` của DuckDB.
+- [x] **9 · Bằng chứng định dạng mở** — ghi bằng `delta-rs`, đọc bằng `delta_scan` của DuckDB.
 
 ### Sáu câu phải trả lời được trước khi sang Phase 3
 
