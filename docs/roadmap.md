@@ -62,20 +62,38 @@ Databricks bằng chính ruột gan của nó.
 
 ### Xác nhận tương thích arm64
 
-Đã kiểm tra `docker manifest inspect` — **tất cả đều có arm64 native**, không phải emulate x86:
+Đã pull thật về máy và kiểm chứng bằng `docker image inspect --format '{{.Architecture}}'`
+(không chỉ đọc manifest). Trạng thái ngày 2026-08-24:
 
 ```
-apache/spark:4.1.3                amd64 arm64
-minio/minio:latest                amd64 arm64 ppc64le
-trinodb/trino:476                 amd64 arm64 ppc64le
-apache/airflow:3.1.0              amd64 arm64
-apache/kafka:4.1.0                amd64 arm64
-ghcr.io/mlflow/mlflow:v3.6.0      amd64 arm64
-apache/superset:4.1.1             amd64 arm64
-unitycatalog/unitycatalog:latest  amd64 arm64
-quay.io/debezium/connect:3.0      amd64 arm64
-postgres:17                       amd64 arm64 + nhiều kiến trúc khác
+apache/spark:4.1.3                linux/arm64   ✅ đã pull
+minio/minio:latest                linux/arm64   ✅ đã pull
+minio/mc:latest                   linux/arm64   ✅ đã pull
+postgres:17                       linux/arm64   ✅ đã pull
+redis:7-alpine                    linux/arm64   ✅ đã pull
+trinodb/trino:476                 linux/arm64   ✅ đã pull
+apache/airflow:3.1.0              linux/arm64   ✅ đã pull
+apache/superset:4.1.1             linux/arm64   ✅ đã pull
+unitycatalog/unitycatalog:v0.6.0  linux/arm64   ✅ đã pull
+ghcr.io/mlflow/mlflow:v3.6.0      linux/arm64   ✅ đã pull
+apache/kafka:4.1.0                linux/arm64   ✅ đã pull
+quay.io/debezium/connect:3.0      linux/arm64   ✅ đã pull
+marquezproject/marquez:latest     linux/amd64   ⚠️ đã pull — CHỈ amd64
+marquezproject/marquez-web:latest linux/amd64   ⚠️ đã pull — CHỈ amd64
 ```
+
+**Hai ngoại lệ cần biết trước khi tới Phase 8:** Marquez (backend OpenLineage) chưa phát hành
+image arm64. Trên Apple Silicon nó sẽ chạy qua emulation x86 — khởi động chậm hơn và tốn RAM
+hơn. Ba lựa chọn khi tới phase đó: chấp nhận emulation, tự build image arm64 từ source, hoặc
+thay bằng phương án lineage khác. Quyết định sau, khi đã thấy nó chậm tới mức nào.
+
+**Về Unity Catalog:** dùng tag cố định `v0.6.0` chứ không phải `latest`. Tag `latest` trỏ tới
+một image khác (image ID khác hẳn) và có thể đổi bất cứ lúc nào — pin version giữ cho môi
+trường tái lập được.
+
+**Về dung lượng đĩa:** toàn bộ image của lộ trình chiếm khoảng **25GB**. Cộng thêm build cache
+Docker (dễ phình lên 20GB+ sau vài lần build) và volume dữ liệu. Chừa sẵn ~40GB trống, và
+chạy `docker builder prune -f` khi thấy chật.
 
 Lưu ý: tránh `bitnami/spark` — Bitnami đã thay đổi cách phát hành image công khai từ 2025.
 Dùng `apache/spark` chính thức, hoặc tự build image từ nó khi cần thêm thư viện.
