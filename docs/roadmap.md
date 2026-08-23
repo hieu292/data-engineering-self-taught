@@ -189,8 +189,8 @@ Gộp tất cả thành một dự án **kể được thành câu chuyện**:
 | Phase | Trạng thái | Ngày xong | Ghi chú |
 |---|---|---|---|
 | 0 · Lát cắt mỏng | ✅ Xong | 2026-08-23 | `notebooks/00_thin_slice.ipynb` |
-| 1 · Storage & file format | 🟡 Đang làm | | `notebooks/01_file_formats.ipynb` |
-| 2 · Delta Lake | ⬜ | | |
+| 1 · Storage & file format | ✅ Xong | 2026-08-23 | `notebooks/01_file_formats.ipynb` |
+| 2 · Delta Lake | 🟡 Đang làm | | `notebooks/02_delta_lake.ipynb` |
 | 3 · Spark | ⬜ | | |
 | 4 · Medallion + dbt | ⬜ | | |
 | 5 · Trino + Superset | ⬜ | | |
@@ -279,3 +279,58 @@ file cũ đã xoá, file mới chưa ghi xong. Một thư mục Parquet trần k
 "phiên bản" hay "giao dịch".
 
 Đó đúng là lỗ hổng Delta Lake sinh ra để vá — và là toàn bộ nội dung Phase 2.
+
+---
+
+## Phần 5 — Phase 2 chi tiết: Delta Lake
+
+> **Sổ tay:** `notebooks/02_delta_lake.ipynb`. Cần build lại image một lần
+> (`make up` — đã thêm `deltalake==1.6.3` vào `docker/jupyter/requirements.txt`).
+
+### Vì sao `delta-rs` chứ không phải `delta-spark`
+
+Spark là nội dung Phase 3. Kéo nó vào đây sẽ trộn hai bài học lớn làm một, và bạn sẽ
+không phân biệt nổi đâu là *Delta* đâu là *Spark*. `delta-rs` là thư viện Rust cài đặt
+**đúng Delta protocol chuẩn** — `_delta_log/` sinh ra giống hệt thứ Databricks thật ghi,
+không cần JVM, khởi động tức thì.
+
+Đến Phase 3, Spark sẽ mở đúng bảng bạn tạo hôm nay mà không cần export/import gì.
+Đó là bằng chứng sống cho luận điểm "Delta là định dạng mở".
+
+### Chín bước
+
+- [ ] **1 · Bảng Delta đầu tiên** — nhìn ra storage: chỉ có file Parquet + thư mục `_delta_log/`.
+      **Một bảng Delta chỉ là một thư mục.**
+- [ ] **2 · Mở `_delta_log/` đọc bằng tay** ⭐ *trọng tâm cả phase* — ba action `protocol` /
+      `metaData` / `add`. Hiểu: **bảng = tập file mà log nói là thuộc về nó**, không phải
+      mọi file trong thư mục. Thống kê min/max được chép sẵn lên log → data skipping ở tầng bảng.
+- [ ] **3 · ACID không cần khoá** — tự tay thử `put-if-absent` (`If-None-Match: *`) trên MinIO:
+      writer thứ hai bị `PreconditionFailed`. **Đó là toàn bộ cơ chế khoá của Delta.**
+      Kèm demo snapshot isolation.
+- [ ] **4 · Time travel + `RESTORE`** — và vì sao restore không xoá lịch sử (log append-only).
+- [ ] **5 · `MERGE` (upsert)** — sửa 2 dòng nhưng `num_target_rows_copied` = 499.998.
+      Hiểu **copy-on-write** và lối thoát *deletion vectors* (merge-on-read).
+- [ ] **6 · Schema evolution** — Delta chặn trước, chỉ cho qua khi khai `schema_mode='merge'`.
+      Thêm cột vào bảng 10 TB tốn vài giây vì **schema nằm trong log, không nằm trong file**.
+- [ ] **7 · `OPTIMIZE` + `Z-ORDER`** — chính việc đã làm tay ở Phase 1, nay gói trong transaction.
+      Bảng min/max sau Z-ORDER cho thấy mỗi file chỉ ôm một dải `pu_zone` hẹp.
+- [ ] **8 · SAI CÓ CHỦ ĐÍCH: `VACUUM` nuốt time travel** — vacuum retention 0 rồi đọc version
+      cũ → `FileNotFoundError`. Log còn, dữ liệu mất. Đây là sự cố production rất phổ biến.
+- [ ] **9 · Bằng chứng định dạng mở** — ghi bằng `delta-rs`, đọc bằng `delta_scan` của DuckDB.
+
+### Sáu câu phải trả lời được trước khi sang Phase 3
+
+1. S3 không có khoá — hai job cùng ghi thì ai thắng, kẻ thua làm gì tiếp?
+2. Vì sao Databricks từng phải dùng DynamoDB cho Delta trên S3, còn nay thì không?
+3. Thêm một cột vào bảng 10 TB mất bao lâu? Vì sao?
+4. `MERGE` sửa 2 dòng nhưng ghi lại nửa triệu dòng — vì sao? *Deletion vectors* đổi gì?
+5. `VACUUM` retention 1 giờ trong khi có job Spark chạy 3 tiếng — chuyện gì xảy ra?
+6. `RESTORE` về version 1 có xoá version 2 không, và vì sao câu trả lời quan trọng?
+
+### Cầu nối sang Phase 3
+
+Delta đã vá xong ba lỗ hổng của Phase 1 (giao dịch, phiên bản, upsert). Nhưng mọi thứ
+trong notebook này vẫn chạy **trên một máy, dữ liệu vừa RAM**.
+
+Câu hỏi còn lại: dữ liệu 500 GB thì tính bằng gì? Đó là Phase 3 — Apache Spark,
+phase nặng nhất của cả lộ trình.

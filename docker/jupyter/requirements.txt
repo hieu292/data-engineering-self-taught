@@ -7,3 +7,8 @@ matplotlib==3.11.1
 
 # Cố tình KHÔNG cài s3fs: nó ghim botocore rất chặt (qua aiobotocore) và xung khắc
 # với boto3 mới. Phase 0 không cần nó — boto3 lo upload, DuckDB tự đọc s3://.
+
+# Phase 2 — Delta Lake. Dùng delta-rs (Rust, không cần JVM) thay vì delta-spark:
+# Spark là nội dung Phase 3, chưa muốn kéo nó vào đây. delta-rs đọc/ghi ĐÚNG
+# chuẩn Delta protocol nên _delta_log sinh ra y hệt Databricks thật.
+deltalake==1.6.3
