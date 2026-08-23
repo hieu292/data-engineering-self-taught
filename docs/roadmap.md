@@ -188,8 +188,8 @@ Gộp tất cả thành một dự án **kể được thành câu chuyện**:
 
 | Phase | Trạng thái | Ngày xong | Ghi chú |
 |---|---|---|---|
-| 0 · Lát cắt mỏng | ⬜ Chưa bắt đầu | | |
-| 1 · Storage & file format | ⬜ | | |
+| 0 · Lát cắt mỏng | ✅ Xong | 2026-08-23 | `notebooks/00_thin_slice.ipynb` |
+| 1 · Storage & file format | 🟡 Đang làm | | `notebooks/01_file_formats.ipynb` |
 | 2 · Delta Lake | ⬜ | | |
 | 3 · Spark | ⬜ | | |
 | 4 · Medallion + dbt | ⬜ | | |
@@ -210,7 +210,7 @@ Gộp tất cả thành một dự án **kể được thành câu chuyện**:
 
 ### Nhóm A — Chuẩn bị dự án
 
-- [ ] **A1 · Cấu trúc thư mục** — vì sao tách `docker/`, `notebooks/`, `scripts/`, `data/`, `docs/`
+- [x] **A1 · Cấu trúc thư mục** — vì sao tách `docker/`, `notebooks/`, `scripts/`, `data/`, `docs/`
 - [ ] **A2 · File `.env`** — tách cấu hình khỏi code, vì sao không hardcode mật khẩu
 
 ### Nhóm B — Đọc hiểu `docker-compose.yml`
@@ -239,3 +239,43 @@ Gộp tất cả thành một dự án **kể được thành câu chuyện**:
 
 - [ ] **F1 · Cách kiểm chứng đúng** — `compose config`, build, chạy notebook bằng `nbclient`
 
+---
+
+## Phần 4 — Phase 1 chi tiết: đo bằng tay, không tin lời đồn
+
+> **Sổ tay:** `notebooks/01_file_formats.ipynb`. Chạy từng cell, **nhìn số của chính mình
+> trước**, đọc giải thích sau. Không cần cài thêm gì — vẫn MinIO + Jupyter của Phase 0.
+
+Phase 1 không thêm service nào vào `docker-compose.yml`. Đó là chủ ý: phase này đào
+**sâu xuống tầng 1**, chứ không mở rộng ra ngang. Thứ thay đổi là hiểu biết, không phải stack.
+
+### Sáu bước
+
+- [ ] **1 · Năm cách lưu cùng một dữ liệu** — CSV / JSON / Parquet (không nén, Snappy, Zstd).
+      Đo byte. Hiểu vì sao Parquet *không nén* đã nhỏ hơn CSV.
+- [ ] **2 · Bấm giờ ba truy vấn** — `count(*)`, một cột, lọc+nhóm. Hiểu **projection pushdown**
+      và vì sao `count(*)` trên Parquet gần như tức thì.
+- [ ] **3 · Mổ bụng file Parquet** — đọc footer bằng `pyarrow`: row group, column chunk,
+      encoding, thống kê min/max. *Nguyên tắc "đọc file thô" của lộ trình.*
+- [ ] **4 · Thứ tự dòng quyết định tốc độ** — cùng dữ liệu, cùng dung lượng: bản xáo trộn
+      phải đọc 25/25 row group, bản sắp xếp chỉ đọc 2/25. **Đây chính là Z-ORDER.**
+- [ ] **5 · Partition Hive-style** — `ngay=2024-01-15/` trên tên thư mục. Đọc `EXPLAIN` thấy
+      `Scanning Files: 1/31` — **partition pruning**. Ba tiêu chí chọn cột partition.
+- [ ] **6 · SAI CÓ CHỦ ĐÍCH: small files problem** — partition theo ngày×giờ, đẻ ra hơn
+      nghìn file nhỏ, chậm hơn cả chục lần trong khi dung lượng còn *phình ra*. Rồi tự tay
+      compaction để chữa — chính là thứ Delta gọi là `OPTIMIZE`.
+
+### Ba câu phải trả lời được trước khi sang Phase 2
+
+1. Parquet nhanh hơn CSV nhờ **ba** cơ chế nào? (Nén **không** nằm trong ba cái đó.)
+2. Hai file Parquet cùng dữ liệu, cùng dung lượng, một cái query nhanh hơn 10 lần — khác ở đâu?
+3. Tổng dung lượng gần như không đổi, sao nghìn file nhỏ lại chậm hơn 31 file? Tiền và
+   thời gian trên object storage tính theo cái gì?
+
+### Cầu nối sang Phase 2
+
+Ở bước 6 bạn gộp file bằng tay. Nếu lúc đó có người đang query, **họ sẽ thấy dữ liệu hỏng**:
+file cũ đã xoá, file mới chưa ghi xong. Một thư mục Parquet trần không có khái niệm
+"phiên bản" hay "giao dịch".
+
+Đó đúng là lỗ hổng Delta Lake sinh ra để vá — và là toàn bộ nội dung Phase 2.
