@@ -12,3 +12,11 @@ matplotlib==3.11.1
 # Spark là nội dung Phase 3, chưa muốn kéo nó vào đây. delta-rs đọc/ghi ĐÚNG
 # chuẩn Delta protocol nên _delta_log sinh ra y hệt Databricks thật.
 deltalake==1.6.3
+
+# Phase 3 — Spark. CHÚ Ý: đây là `pyspark-client`, KHÔNG phải `pyspark`.
+# `pyspark` đầy đủ kéo theo cả bản phân phối Spark + JVM (~400MB) vào image
+# notebook — thứ hoàn toàn thừa, vì tính toán diễn ra ở container spark-connect.
+# `pyspark-client` (mới có từ Spark 4) chỉ gồm DataFrame API + gRPC: một client
+# mỏng đúng nghĩa. Đây chính là mô hình Databricks Connect.
+# Version phải khớp server (apache/spark:4.1.3).
+pyspark-client==4.1.3

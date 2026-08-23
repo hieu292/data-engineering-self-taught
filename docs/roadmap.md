@@ -32,7 +32,7 @@ Databricks không phải một sản phẩm, nó là **7 tầng xếp chồng**.
 |---|---|---|---|---|
 | 1 | Object storage | DBFS / S3 | **MinIO** | Chứa file thô, rẻ, vô hạn — nhưng không có transaction |
 | 2 | Table format | **Delta Lake** | **Delta Lake** *(chính hãng)* | ACID, time-travel, schema evolution trên đống file ở tầng 1 |
-| 3 | Compute engine | Databricks Runtime | **Apache Spark 4** | Xử lý song song, tính toán trên dữ liệu lớn hơn RAM |
+| 3 | Compute engine | Databricks Runtime | **Apache Spark 4.1** | Xử lý song song, tính toán trên dữ liệu lớn hơn RAM |
 | 4 | Catalog / governance | **Unity Catalog** | **Unity Catalog OSS** *(chính hãng)* | "Có bảng nào, ai được đọc, dữ liệu từ đâu ra" |
 | 5 | SQL warehouse | SQL Warehouse (Photon) | **Trino** | Query SQL nhanh, phục vụ BI và analyst |
 | 6 | Transform + Orchestration | Workflows / DLT | **dbt-core + Airflow 3** | Biến dữ liệu thô thành bảng sạch, chạy đúng giờ đúng thứ tự |
@@ -65,7 +65,7 @@ Databricks bằng chính ruột gan của nó.
 Đã kiểm tra `docker manifest inspect` — **tất cả đều có arm64 native**, không phải emulate x86:
 
 ```
-apache/spark:4.0.1                amd64 arm64
+apache/spark:4.1.3                amd64 arm64
 minio/minio:latest                amd64 arm64 ppc64le
 trinodb/trino:476                 amd64 arm64 ppc64le
 apache/airflow:3.1.0              amd64 arm64
@@ -191,7 +191,7 @@ Gộp tất cả thành một dự án **kể được thành câu chuyện**:
 | 0 · Lát cắt mỏng | ✅ Xong | 2026-08-23 | `notebooks/00_thin_slice.ipynb` |
 | 1 · Storage & file format | ✅ Xong | 2026-08-23 | `notebooks/01_file_formats.ipynb` |
 | 2 · Delta Lake | ✅ Xong | 2026-08-23 | `notebooks/02_delta_lake.ipynb` |
-| 3 · Spark | ⬜ | | |
+| 3 · Spark | 🟡 Đang làm | | `notebooks/03_spark.ipynb` |
 | 4 · Medallion + dbt | ⬜ | | |
 | 5 · Trino + Superset | ⬜ | | |
 | 6 · Unity Catalog | ⬜ | | |
@@ -334,3 +334,101 @@ trong notebook này vẫn chạy **trên một máy, dữ liệu vừa RAM**.
 
 Câu hỏi còn lại: dữ liệu 500 GB thì tính bằng gì? Đó là Phase 3 — Apache Spark,
 phase nặng nhất của cả lộ trình.
+
+
+---
+
+## Phần 6 — Phase 3 chi tiết: Apache Spark
+
+> **Sổ tay:** `notebooks/03_spark.ipynb`. Cần `make up` để build image Spark
+> (lần đầu ~10 phút, chủ yếu là 611MB AWS SDK) và `make data` để tải đủ 12 tháng.
+
+Đây là phase đầu tiên kể từ Phase 0 **thêm service mới vào stack** — và thêm một lúc bốn cái.
+Phase 1 và 2 đào sâu xuống tầng dưới; Phase 3 dựng hẳn tầng 3 lên trên.
+
+### Bốn container, một image
+
+```
+jupyter ──sc://15002──► spark-connect (DRIVER) ──7077──► spark-master
+  client mỏng                 │                              │
+                          UI :4040                    ┌──────┴──────┐
+                                                  worker-1      worker-2
+                                                  2 core/4GB    2 core/4GB
+```
+
+Cả bốn dùng **chung một image** (`docker/spark/Dockerfile`). Vai trò khác nhau hoàn toàn do
+`command`. Đó không phải mẹo tiết kiệm — Spark thật cũng vậy: cùng một bộ binary, khác nhau
+ở tiến trình nào được khởi động.
+
+**Điểm dễ hiểu nhầm nhất:** notebook của bạn **không chứa driver**. Driver sống trong container
+`spark-connect`, thường trực, nhận lệnh qua gRPC. Notebook chỉ là bàn phím. Đây đúng là mô hình
+**Databricks Connect** — và là lý do `docker/jupyter/requirements.txt` cài `pyspark-client`
+chứ không phải `pyspark`.
+
+**Vì sao hai worker chứ không một:** để shuffle buộc phải đi qua network giữa hai JVM khác nhau.
+Một worker thì shuffle chỉ là chép file trong cùng tiến trình — nhìn không ra vấn đề.
+Tổng 4 core là con số cố ý nhỏ: đủ để một task lệch (skew) treo trong khi ba task kia đã rảnh.
+
+### Ba cái bẫy version đã gỡ sẵn
+
+Ghi lại vì đây đúng là kiểu lỗi mất cả buổi tối, và là bài học C2 của Phase 0 lặp lại ở quy mô lớn hơn:
+
+| Bẫy | Sai ở đâu | Đúng là |
+|---|---|---|
+| `delta-spark` bản mới nhất | 4.4.0 khai `spark-sql 4.2.0` trong pom | **4.3.1** — khai `4.1.0`, khớp image |
+| AWS SDK | Hướng dẫn cũ dạy `aws-java-sdk-bundle` (SDK v1) | Hadoop 3.4 dùng **SDK v2**: `software.amazon.awssdk:bundle` |
+| `hadoop-aws` | Chọn đại bản mới | Phải khớp **chính xác** `hadoop-client-*.jar` trong image (3.4.2) |
+| Python UDF chết ngay lần gọi đầu | Image Spark mang Python 3.10, notebook chạy 3.13 | Cài thêm Python **3.13** vào image Spark, trỏ `PYSPARK_PYTHON` vào đó |
+| `Permission denied` khi chạy UDF | `uv` cài Python vào `/root` (mode 700); executor chạy bằng user `spark` | `UV_PYTHON_INSTALL_DIR=/opt/...` + `chmod a+rX` |
+| `Missing an output location for shuffle` | Docker Desktop chỉ cấp ~8GB dù máy 32GB. Executor bị kernel giết (`exit 137`) | Tổng RAM Spark phải **dưới trần Docker VM**: 2×2g + driver 1g |
+
+"Mới nhất" và "đúng" là hai chuyện khác nhau. Cách tra: đọc `pom` trên Maven Central, không đoán.
+
+Bẫy cuối đáng nhớ vì lý do khác: **lỗi hiện ra ở tầng shuffle, nguyên nhân nằm ở tầng hệ
+điều hành**. Spark báo "thiếu output của shuffle", nhưng sự thật là executor đã bị kernel
+giết vì hết RAM. Gặp `MetadataFetchFailedException`, việc đầu tiên nên làm là
+`docker compose logs spark-worker-1 | grep 137` chứ không phải chỉnh `spark.sql.shuffle.partitions`.
+
+Cái bẫy Python đáng nhớ nhất: UDF được **pickle ở client, unpickle ở executor**. Khác version
+là khác định dạng bytecode. Databricks cũng bắt version Databricks Connect phải khớp Databricks
+Runtime — cùng một lý do, chỉ là họ giấu nó sau bảng tương thích trên tài liệu.
+
+### Chín bước
+
+- [ ] **1 · Nối cluster bằng `sc://`** — in ra executor thật. Mở song song :8080 và :4040,
+      đối chiếu với sơ đồ trên. Hiểu driver ở đâu, executor ở đâu, ai nói chuyện với ai.
+- [ ] **2 · Lazy evaluation** — transformation không sinh job nào, action mới sinh.
+      Đếm job trên UI để **tự chứng minh**, không tin lời sách.
+- [ ] **3 · Partition sinh ra từ đâu** — đọc 12 tháng từ MinIO qua S3A, `getNumPartitions()`.
+      Số file × kích thước split, không phải con số ngẫu nhiên.
+- [ ] **4 · Narrow vs wide** ⭐ — `filter`/`select` không shuffle, `groupBy` thì có.
+      Nhìn DAG trên UI: **ranh giới stage chính là shuffle**. Đây là ý niệm quan trọng nhất
+      của cả phase — mọi thứ về hiệu năng Spark đều quy về câu hỏi "có shuffle không, bao nhiêu".
+- [ ] **5 · SAI CÓ CHỦ ĐÍCH ①: job chậm thảm hại** — Python UDF + `repartition` thừa +
+      join không broadcast. Rồi chữa từng thứ một, đo lại sau mỗi lần. **Mục tiêu ≥3×.**
+- [ ] **6 · Broadcast join vs sort-merge** — `explain()` thấy plan đổi hẳn chiến lược,
+      và thấy broadcast xoá được **cả một shuffle** chứ không chỉ nhanh hơn chút ít.
+- [ ] **7 · SAI CÓ CHỦ ĐÍCH ②: data skew** — cố ý làm key lệch, thấy 1 task chạy mãi trong khi
+      3 task kia xong từ lâu. Chữa bằng salting, rồi tắt/bật AQE xem Spark 4 tự xử đến đâu.
+- [ ] **8 · Spark mở đúng bảng Delta của Phase 2** — không export, không convert, không import.
+      Rồi ghi ngược lại bằng Spark cho `delta-rs` đọc. Bằng chứng sống cho
+      "Delta là định dạng mở" mà Phần 5 đã hứa.
+- [ ] **9 · Khi nào KHÔNG nên dùng Spark** — ở quy mô 36 triệu dòng, DuckDB một máy vẫn thắng.
+      Biết giới hạn này là câu trả lời phỏng vấn tốt hơn nhiều so với ca ngợi Spark.
+
+### Năm câu phải trả lời được trước khi sang Phase 4
+
+1. Driver và executor, cái nào chạy code trong cell notebook của bạn? Cái nào giữ kết quả `collect()`?
+2. Vì sao `df.filter(...)` chạy tức thì còn `df.filter(...).count()` mất 30 giây?
+3. Shuffle tốn ở chỗ nào — đĩa, network, hay CPU? Kể tên hai cách xoá bỏ một shuffle.
+4. Một stage có 200 task, 199 task xong trong 2 giây, 1 task chạy 4 phút. Chuyện gì đang xảy ra
+   và bạn sửa thế nào?
+5. Dữ liệu 5GB, một máy 32GB RAM — vì sao Spark có thể **chậm hơn** DuckDB?
+
+### Cầu nối sang Phase 4
+
+Hết Phase 3, bạn có đủ ba mảnh của một lakehouse: storage (MinIO), table format (Delta),
+compute (Spark). Nhưng logic biến đổi dữ liệu vẫn nằm rải rác trong các cell notebook —
+không ai chạy lại được, không ai test được, không ai biết bảng nào phụ thuộc bảng nào.
+
+Đó là vấn đề Phase 4 giải: **medallion + dbt**.

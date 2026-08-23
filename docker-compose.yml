@@ -44,12 +44,100 @@ services:
       "
     networks: [lakehouse]
 
+
+  # ═══════════════════════════════════════════════════════════════
+  #  Tầng 3: Compute engine. Databricks gọi là "Databricks Runtime".
+  #  Bốn container dưới đây dùng CHUNG một image (docker/spark).
+  #  Vai trò khác nhau hoàn toàn do `command`, không do image.
+  # ═══════════════════════════════════════════════════════════════
+
+  # ── Bộ não điều phối. Không tính toán gì cả — chỉ chia việc. ──
+  spark-master:
+    build: ./docker/spark
+    image: lakehouse/spark:4.1.3
+    container_name: lakehouse-spark-master
+    command: /opt/spark/sbin/spark-daemon.sh start org.apache.spark.deploy.master.Master 1 --host spark-master --port 7077 --webui-port 8080
+    environment: &spark-env
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      AWS_REGION: us-east-1
+      SPARK_NO_DAEMONIZE: "true"
+    ports:
+      - "${SPARK_MASTER_UI_PORT}:8080"   # UI: xem worker nào còn sống, app nào đang chạy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080 > /dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [lakehouse]
+
+  # ── Nơi tính toán thật. Executor sinh ra bên trong worker. ──
+  # Hai worker chứ không phải một: để shuffle buộc phải đi qua network
+  # giữa hai JVM khác nhau, đúng như cluster thật. Một worker thì shuffle
+  # chỉ là chép file trong cùng tiến trình — không học được gì.
+  spark-worker-1:
+    build: ./docker/spark
+    image: lakehouse/spark:4.1.3
+    container_name: lakehouse-spark-worker-1
+    depends_on:
+      spark-master: { condition: service_healthy }
+    command: /opt/spark/sbin/spark-daemon.sh start org.apache.spark.deploy.worker.Worker 1 --webui-port 8081 spark://spark-master:7077
+    environment:
+      <<: *spark-env
+      SPARK_WORKER_CORES: ${SPARK_WORKER_CORES}
+      SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY}
+    networks: [lakehouse]
+
+  spark-worker-2:
+    build: ./docker/spark
+    image: lakehouse/spark:4.1.3
+    container_name: lakehouse-spark-worker-2
+    depends_on:
+      spark-master: { condition: service_healthy }
+    command: /opt/spark/sbin/spark-daemon.sh start org.apache.spark.deploy.worker.Worker 2 --webui-port 8081 spark://spark-master:7077
+    environment:
+      <<: *spark-env
+      SPARK_WORKER_CORES: ${SPARK_WORKER_CORES}
+      SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY}
+    networks: [lakehouse]
+
+  # ── DRIVER. Đây là container quan trọng nhất để hiểu Phase 3. ──
+  # Notebook KHÔNG chứa driver. Driver sống ở đây, thường trực, và nhận
+  # lệnh từ xa qua gRPC (giao thức sc://). Đó chính là mô hình
+  # Databricks Connect: notebook chỉ là bàn phím, bộ não ở chỗ khác.
+  spark-connect:
+    build: ./docker/spark
+    image: lakehouse/spark:4.1.3
+    container_name: lakehouse-spark-connect
+    depends_on:
+      spark-worker-1: { condition: service_started }
+      spark-worker-2: { condition: service_started }
+      minio-init: { condition: service_completed_successfully }
+    command: >
+      /opt/spark/sbin/start-connect-server.sh
+      --master spark://spark-master:7077
+      --conf spark.driver.host=spark-connect
+      --conf spark.connect.grpc.binding.port=15002
+      --conf spark.ui.port=4040
+    environment: *spark-env
+    ports:
+      - "${SPARK_CONNECT_PORT}:15002"   # gRPC: notebook nối vào bằng cổng này
+      - "${SPARK_APP_UI_PORT}:4040"     # Spark UI — cổng quan trọng nhất Phase 3
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4040 > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    networks: [lakehouse]
+
   # ── Tầng 7: Notebook. Nơi bạn thực sự chạm vào dữ liệu. ──
   jupyter:
     build: ./docker/jupyter
     container_name: lakehouse-jupyter
     depends_on:
       minio-init: { condition: service_completed_successfully }
+      spark-connect: { condition: service_healthy }
     environment:
       # Biến chuẩn AWS — boto3/s3fs/duckdb đều tự đọc, không cần hardcode key trong code
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
@@ -57,6 +145,8 @@ services:
       AWS_ENDPOINT_URL: http://minio:9000
       AWS_REGION: us-east-1
       LAKEHOUSE_BUCKET: ${MINIO_BUCKET}
+      # Notebook đọc biến này để biết nối vào đâu — không hardcode trong cell
+      SPARK_REMOTE: sc://spark-connect:15002
     ports:
       - "${JUPYTER_PORT}:8888"
     volumes:
