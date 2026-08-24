@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<!--
+  Nói chuyện với MinIO qua s3a:// — cùng bài học Phase 3, nhưng lần này là
+  CHÍNH Hive Metastore cần nó, không phải Spark. Metastore validate LOCATION
+  của bảng/database (s3a://...) bằng FileSystem API của Hadoop, nên nó cũng
+  cần biết MinIO ở đâu, không chỉ "biết tên đường dẫn".
+
+  ${env.VAR} — cú pháp nội suy biến môi trường sẵn có của Hadoop Configuration,
+  không hardcode key vào file XML commit trong git.
+-->
+<configuration>
+  <property>
+    <name>fs.s3a.impl</name>
+    <value>org.apache.hadoop.fs.s3a.S3AFileSystem</value>
+  </property>
+  <property>
+    <name>fs.s3a.endpoint</name>
+    <value>http://minio:9000</value>
+  </property>
+  <property>
+    <name>fs.s3a.endpoint.region</name>
+    <value>us-east-1</value>
+  </property>
+  <property>
+    <name>fs.s3a.connection.ssl.enabled</name>
+    <value>false</value>
+  </property>
+  <!-- BẮT BUỘC với MinIO — path style, không phải virtual-host style của AWS thật. -->
+  <property>
+    <name>fs.s3a.path.style.access</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>fs.s3a.access.key</name>
+    <value>${env.AWS_ACCESS_KEY_ID}</value>
+  </property>
+  <property>
+    <name>fs.s3a.secret.key</name>
+    <value>${env.AWS_SECRET_ACCESS_KEY}</value>
+  </property>
+</configuration>

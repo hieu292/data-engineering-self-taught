@@ -1,0 +1,5 @@
+# apache/superset:4.1.1 không mang sẵn driver cho Postgres (metadata DB)
+# lẫn Trino (nguồn dữ liệu BI) — kiểm chứng bằng `pip show` trong chính
+# image trước khi thêm, không đoán.
+psycopg2-binary==2.9.12
+trino[sqlalchemy]==0.339.0

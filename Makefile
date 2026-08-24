@@ -13,6 +13,8 @@ up: ## Khởi động toàn bộ stack
 	@echo "  Spark master  : http://localhost:8080   (xem worker nào còn sống)"
 	@echo "  Spark app UI  : http://localhost:4040   (đọc job/stage/shuffle)"
 	@echo "  dbt docs      : http://localhost:8081   (sau khi chạy 'make dbt-docs')"
+	@echo "  Trino UI      : http://localhost:8082   (SHOW SCHEMAS FROM delta)"
+	@echo "  Superset      : http://localhost:8088   (admin / xem SUPERSET_ADMIN_PASSWORD trong .env)"
 
 down: ## Dừng stack (giữ dữ liệu)
 	docker compose down
@@ -63,8 +65,11 @@ shell: ## Vào shell của container jupyter
 spark-shell: ## Mở pyspark shell nối vào cluster (gỡ lỗi nhanh)
 	docker compose exec spark-connect /opt/spark/bin/pyspark --remote sc://localhost:15002
 
+trino-shell: ## Mở Trino CLI, catalog delta sẵn (gỡ lỗi nhanh)
+	docker compose exec trino trino --catalog delta
+
 cluster: ## Kiểm tra cluster Spark: worker nào đang ALIVE
 	@docker compose exec spark-master curl -s http://localhost:8080/json/ | \
 	  python3 -c "import sys,json;d=json.load(sys.stdin);print(f\"Master {d['status']} — {d['aliveworkers']} worker ALIVE, {d['cores']} core, {d['memory']}MB\");[print('  •',w['id'],w['state'],w['cores'],'core') for w in d['workers']]"
 
-.PHONY: help up down clean logs ps data ingest dbt dbt-trap dbt-test dbt-docs dbt-shell shell spark-shell cluster
+.PHONY: help up down clean logs ps data ingest dbt dbt-trap dbt-test dbt-docs dbt-shell shell spark-shell trino-shell cluster

@@ -46,6 +46,67 @@ services:
 
 
   # ═══════════════════════════════════════════════════════════════
+  #  Tầng 4: Catalog. Phase 4 dùng Derby NHÚNG trong JVM spark-connect —
+  #  chỉ MỘT tiến trình mở được. Từ Phase 5, catalog tách thành service
+  #  riêng (Hive Metastore, ghi vào Postgres) để Spark VÀ Trino cùng trỏ
+  #  vào một chỗ. Đây là bản nháp của Unity Catalog ở Phase 6.
+  # ═══════════════════════════════════════════════════════════════
+  postgres:
+    image: postgres:17
+    container_name: lakehouse-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_METASTORE_DB}
+      # Đọc bởi docker/postgres/init/01-create-superset-db.sh — chạy một
+      # lần lúc volume postgres-data còn trống, tạo thêm DB thứ hai cho
+      # Superset trong CÙNG một Postgres.
+      POSTGRES_SUPERSET_DB: ${POSTGRES_SUPERSET_DB}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [lakehouse]
+
+  # ── Hive Metastore ĐỘC LẬP — thrift://:9083. Không phải Hive engine
+  # (thứ đã chết), chỉ là một schema SQL lưu "bảng nào, cột gì, ở đâu".
+  # Entrypoint gốc của ảnh tự chạy schematool -initOrUpgradeSchema mỗi lần
+  # khởi động — idempotent, không cần bước init riêng như minio-init.
+  hive-metastore:
+    build: ./docker/hive-metastore
+    image: lakehouse/hive-metastore:4.0.0
+    container_name: lakehouse-hive-metastore
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      SERVICE_OPTS: >-
+        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://postgres:5432/${POSTGRES_METASTORE_DB}
+        -Djavax.jdo.option.ConnectionUserName=${POSTGRES_USER}
+        -Djavax.jdo.option.ConnectionPassword=${POSTGRES_PASSWORD}
+      # Đọc bởi core-site.xml (${env.VAR}) — metastore tự validate LOCATION
+      # s3a://... của bảng/database nên cũng cần thấy MinIO, không chỉ Spark.
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${HIVE_METASTORE_PORT}:9083"
+    healthcheck:
+      # Chưa có curl/nc trong ảnh — /dev/tcp là built-in của bash, đủ để
+      # biết cổng Thrift đã mở hay chưa.
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/9083'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks: [lakehouse]
+
+  # ═══════════════════════════════════════════════════════════════
   #  Tầng 3: Compute engine. Databricks gọi là "Databricks Runtime".
   #  Bốn container dưới đây dùng CHUNG một image (docker/spark).
   #  Vai trò khác nhau hoàn toàn do `command`, không do image.
@@ -113,6 +174,7 @@ services:
       spark-worker-1: { condition: service_started }
       spark-worker-2: { condition: service_started }
       minio-init: { condition: service_completed_successfully }
+      hive-metastore: { condition: service_healthy }
     command: >
       /opt/spark/sbin/start-connect-server.sh
       --master spark://spark-master:7077
@@ -123,11 +185,6 @@ services:
     ports:
       - "${SPARK_CONNECT_PORT}:15002"   # gRPC: notebook nối vào bằng cổng này
       - "${SPARK_APP_UI_PORT}:4040"     # Spark UI — cổng quan trọng nhất Phase 3
-    volumes:
-      # Phase 4: Hive Metastore nhúng. Không có volume này thì danh sách bảng
-      # biến mất mỗi lần container khởi động lại — dữ liệu trên MinIO còn nguyên
-      # nhưng không ai nhớ nó là bảng gì nữa.
-      - spark-metastore:/opt/spark/metastore
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:4040 > /dev/null"]
       interval: 10s
@@ -143,6 +200,7 @@ services:
     depends_on:
       minio-init: { condition: service_completed_successfully }
       spark-connect: { condition: service_healthy }
+      trino: { condition: service_healthy }
     environment:
       # Biến chuẩn AWS — boto3/s3fs/duckdb đều tự đọc, không cần hardcode key trong code
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
@@ -152,6 +210,10 @@ services:
       LAKEHOUSE_BUCKET: ${MINIO_BUCKET}
       # Notebook đọc biến này để biết nối vào đâu — không hardcode trong cell
       SPARK_REMOTE: sc://spark-connect:15002
+      # Phase 5 — cổng HTTP thuần, không gRPC, không JVM. Trong container dùng
+      # tên service; một analyst thật ngồi ngoài máy sẽ dùng localhost:${TRINO_PORT}.
+      TRINO_HOST: trino
+      TRINO_PORT: "8080"
     ports:
       - "${JUPYTER_PORT}:8888"
     volumes:
@@ -190,9 +252,84 @@ services:
       - "${DBT_DOCS_PORT}:8081"    # `make dbt-docs` — sơ đồ lineage của cả pipeline
     networks: [lakehouse]
 
+  # ═══════════════════════════════════════════════════════════════
+  #  Tầng 5: SQL warehouse. Databricks gọi là "SQL Warehouse (Photon)".
+  #  Trino KHÔNG tính toán qua Spark — nó là engine SQL riêng, đọc thẳng
+  #  Delta transaction log (connector delta_lake), chỉ mượn Hive Metastore
+  #  để biết bảng nằm ở đâu. Đây là ý nghĩa thật của "Delta là định dạng
+  #  mở": ba engine khác nhau (delta-rs, Spark, Trino) cùng đọc một bộ
+  #  file, không engine nào sở hữu riêng.
+  # ═══════════════════════════════════════════════════════════════
+  trino:
+    image: trinodb/trino:476
+    container_name: lakehouse-trino
+    depends_on:
+      hive-metastore: { condition: service_healthy }
+      minio-init: { condition: service_completed_successfully }
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - ./docker/trino/etc:/etc/trino:ro
+    ports:
+      - "${TRINO_PORT}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/v1/info | grep -q '\"starting\":false'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks: [lakehouse]
+
+  # ═══════════════════════════════════════════════════════════════
+  #  Tầng 7 (nhánh BI): Databricks Dashboards. Nơi analyst thật sự dùng —
+  #  không viết SQL tay, chỉ kéo-thả trên bảng Trino đã phơi ra ở trên.
+  # ═══════════════════════════════════════════════════════════════
+
+  # ── Chạy một lần rồi thoát, giống minio-init: dựng schema metadata,
+  # tạo tài khoản admin, đồng bộ role mặc định. Idempotent khi restart —
+  # create-admin bọc trong ngoặc () || true để không chặn lần chạy sau. ──
+  superset-init:
+    build: ./docker/superset
+    image: lakehouse/superset:4.1.1
+    container_name: lakehouse-superset-init
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment: &superset-env
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_SUPERSET_DB: ${POSTGRES_SUPERSET_DB}
+    # entrypoint dạng LIST (exec form), toàn bộ script gói trong MỘT chuỗi
+    # không xuống dòng. Từng thử viết nhiều dòng bằng `entrypoint: >` — YAML
+    # folded scalar chỉ gộp dòng thành dấu cách khi mọi dòng THẲNG HÀNG; dòng
+    # thụt sâu hơn (như --username ở dưới create-admin) bị giữ nguyên xuống
+    # dòng, biến mỗi --flag thành một LỆNH SHELL riêng và vỡ hoàn toàn.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >-
+        superset db upgrade &&
+        (superset fab create-admin --username ${SUPERSET_ADMIN_USER} --firstname Admin --lastname User --email ${SUPERSET_ADMIN_EMAIL} --password ${SUPERSET_ADMIN_PASSWORD} || true) &&
+        superset init &&
+        echo 'Superset khoi tao xong'
+    networks: [lakehouse]
+
+  superset:
+    build: ./docker/superset
+    image: lakehouse/superset:4.1.1
+    container_name: lakehouse-superset
+    depends_on:
+      superset-init: { condition: service_completed_successfully }
+      trino: { condition: service_healthy }
+    environment: *superset-env
+    ports:
+      - "${SUPERSET_PORT}:8088"
+    networks: [lakehouse]
+
 volumes:
   minio-data:
-  spark-metastore:
+  postgres-data:
 
 networks:
   lakehouse:

@@ -80,6 +80,10 @@ apache/kafka:4.1.0                linux/arm64   ✅ đã pull
 quay.io/debezium/connect:3.0      linux/arm64   ✅ đã pull
 marquezproject/marquez:latest     linux/amd64   ⚠️ đã pull — CHỈ amd64
 marquezproject/marquez-web:latest linux/amd64   ⚠️ đã pull — CHỈ amd64
+apache/hive:4.0.0                 linux/arm64   ⚠️ manifest đa kiến trúc có arm64,
+                                                    chưa `docker image inspect` trên
+                                                    máy arm64 thật (dựng Phase 5 trên
+                                                    máy phát triển x86_64)
 ```
 
 **Hai ngoại lệ cần biết trước khi tới Phase 8:** Marquez (backend OpenLineage) chưa phát hành
@@ -216,7 +220,7 @@ Gộp tất cả thành một dự án **kể được thành câu chuyện**:
 | 2 · Delta Lake | ✅ Xong | 2026-08-23 | `notebooks/02_delta_lake.ipynb` |
 | 3 · Spark | ✅ Xong | 2026-08-23 | `notebooks/03_spark.ipynb` |
 | 4 · Medallion + dbt | ✅ Xong | 2026-08-24 | `notebooks/04_medallion_dbt.ipynb` + `dbt/` |
-| 5 · Trino + Superset | ⬜ | | |
+| 5 · Trino + Superset | ✅ Xong | 2026-08-24 | `notebooks/05_trino_superset.ipynb` + Hive Metastore độc lập |
 | 6 · Unity Catalog | ⬜ | | |
 | 7 · Airflow | ⬜ | | |
 | 8 · Data quality | ⬜ | | |
@@ -610,3 +614,112 @@ Và ở đó sẽ lộ ra đúng giới hạn của cái catalog tạm dựng h�
 bằng Derby chỉ một tiến trình JVM mở được**. Trino sẽ không nhìn thấy bảng nào cả. Đó
 chính là lúc câu hỏi *"vì sao cần Unity Catalog"* trở thành câu hỏi của bạn, chứ không
 còn là một dòng trong bảng so sánh ở Phần 1.
+
+---
+
+## Phần 8 — Phase 5 chi tiết: Trino + Superset
+
+> **Sổ tay:** `notebooks/05_trino_superset.ipynb`. Cần `make up` (build thêm
+> `hive-metastore`, `postgres`, `trino`, `superset`, ~2 phút). Vì catalog đổi từ Derby
+> nhúng sang Hive Metastore độc lập, lượt dựng phase này đi kèm một lần rebuild sạch:
+> `make clean && make up && make data && make ingest && make dbt`.
+
+### Quyết định kiến trúc: không vá Trino, mà thay cả catalog
+
+Dự định ban đầu là "chỉ thêm Trino". Nhưng thử trỏ Trino vào Derby nhúng của Phase 4
+thì lộ ngay: đó không phải một service mạng, mà là một *thư viện chạy trong đúng JVM
+của `spark-connect`* — không có cổng Thrift nào để Trino gõ cửa. Vá riêng cho Trino
+(vd: một bản sao catalog khác) sẽ tạo ra HAI nguồn sự thật về "bảng nào ở đâu" — đúng
+kiểu nợ kỹ thuật dự án này cố tránh từ đầu.
+
+Cách sửa đúng: tách catalog thành một service độc lập mà **cả Spark lẫn Trino cùng
+trỏ vào**.
+
+```
+jupyter/dbt ──sc://15002──► spark-connect ──┐
+                                             ├──► hive-metastore ──thrift:9083──► postgres
+trino ───────────HTTP :8080─────────────────┘         (metastore_db)
+
+superset ──sqlalchemy-trino──► trino
+```
+
+- **`hive-metastore`** — `apache/hive:4.0.0` chạy vai `metastore` độc lập
+  (`SERVICE_NAME=metastore`), ghi vào Postgres qua JDBC thay vì Derby. Đây KHÔNG phải
+  Unity Catalog — không phân quyền, không lineage, không đa catalog — nhưng đã là một
+  **service thật**, điều Derby nhúng chưa từng là.
+- **`postgres`** — dùng chung một container cho cả metadata Hive Metastore lẫn metadata
+  Superset (hai database khác nhau), thay vì dựng hai Postgres chỉ để tiết kiệm RAM.
+- **`trino`** — catalog duy nhất `delta`, connector **`delta_lake`** chứ không phải
+  `hive`: đọc thẳng `_delta_log/`, chỉ mượn Hive Metastore để biết đường dẫn bảng. Tên
+  file `docker/trino/etc/catalog/delta.properties` chính là tên catalog — nguồn gốc của
+  cú pháp `delta.silver.silver_trips` ba tầng.
+- **`superset`** — ảnh gốc build thêm driver `trino[sqlalchemy]` + `psycopg2-binary`.
+
+`spark-defaults.conf` đổi từ
+
+```
+spark.hadoop.javax.jdo.option.ConnectionURL  jdbc:derby:;databaseName=...
+```
+
+sang một dòng:
+
+```
+spark.hadoop.hive.metastore.uris  thrift://hive-metastore:9083
+```
+
+### Sáu bước
+
+- [x] **1 · `catalog.schema.table`** — `SHOW CATALOGS`, `SHOW SCHEMAS FROM delta`. Ba
+      tầng tên chứ không hai — và tầng thêm vào chính là bản nháp của Unity Catalog.
+- [x] **2 · Cùng một `_delta_log/`, ba engine đọc** — đối chiếu số Trino ra với số Spark/
+      dbt đã đo ở Phase 4. Khớp tuyệt đối: 41.169.720 → 35.613.229 → 80.523 + 1.300.
+- [x] **3 · SAI CÓ CHỦ ĐÍCH: catalog nhúng không phải dịch vụ dùng chung** ⭐ — trỏ
+      `hive.metastore.uri` của Trino vào một cổng không ai lắng nghe, thấy Trino vẫn
+      *khởi động khoẻ mạnh* nhưng `SHOW SCHEMAS` lỗi thật. Rồi sửa bằng kiến trúc catalog
+      độc lập ở trên.
+- [x] **4 · Trả lời câu hỏi nghiệp vụ bằng SQL thuần** — doanh thu theo borough, nhu cầu
+      theo giờ — không một dòng PySpark, không mở `spark-connect`.
+- [x] **5 · Superset: SQL Lab → dataset → dashboard** — nối `Trino Lakehouse` qua
+      `trino://trino@trino:8080/delta`, dựng dashboard **"Lakehouse — NYC Taxi 2024"**
+      với 2 chart thật (doanh thu theo ngày, nhu cầu theo giờ).
+- [x] **6 · dbt KHÔNG phải một engine, Trino cũng KHÔNG PHẢI SPARK** — mở `:4040` lúc
+      chạy query Trino: không job nào xuất hiện. Song song bài học Phase 4 về dbt.
+
+### Bốn cái bẫy đã sập thật khi dựng phase này
+
+| Bẫy | Triệu chứng | Nguyên nhân thật |
+|---|---|---|
+| Tên thuộc tính S3 của Trino | `Configuration property 'fs.s3.enabled' was not used` | Trino 476 dùng `fs.native-s3.enabled`, không phải `fs.s3.enabled` — tài liệu/bài viết cũ trên mạng còn dạy tên cũ |
+| Hive Metastore không đọc nổi `s3a://` | `ClassNotFoundException: org.apache.hadoop.fs.s3a.S3AFileSystem` | Chính Metastore (không chỉ Spark) tự validate LOCATION bảng — cần `hadoop-aws` khớp bản Hadoop **3.3.6** ảnh `apache/hive` mang theo, tức SDK v1 (`aws-java-sdk-bundle:1.12.367`), khác hẳn cặp Hadoop 3.4.2 / SDK v2 của ảnh Spark |
+| `docker-compose.yml` — entrypoint nhiều dòng vỡ | `superset fab create-admin` chạy không cờ, mỗi `--flag` thành một LỆNH SHELL riêng (`/bin/sh: --username: not found`) | YAML folded scalar (`>`) chỉ gộp dòng thành dấu cách khi MỌI dòng thẳng hàng; dòng thụt sâu hơn (các `--flag`) bị giữ nguyên xuống dòng. Sửa bằng entrypoint dạng list + một chuỗi `>-` phẳng, không dòng nào thụt lệch |
+| Dashboard Superset dựng qua API "trống trơn" | Chart đã gắn vào dashboard (`ADDED`) nhưng mở lên không thấy gì | `position_json` tự viết tay thiếu đúng thuộc tính kích thước grid mà Superset cần — chart tồn tại nhưng cao 0px. Sửa bằng kéo-thả thật trong UI thay vì tự sinh JSON layout |
+
+Cái bẫy thứ hai đáng nhớ nhất: đây là LẦN THỨ HAI trong dự án một thành phần cần
+`hadoop-aws` khớp chính xác phiên bản Hadoop nó mang theo (lần đầu là
+`docker/spark/Dockerfile` ở Phase 3) — nhưng lần này là một thành phần hoàn toàn khác
+(Hive Metastore, không phải Spark), với một cặp version khác hẳn. Bài học không phải
+"nhớ đúng một con số", mà là **luôn tra `hadoop-*` bundled trong chính ảnh trước khi
+chọn `hadoop-aws`**, không suy diễn từ thành phần khác.
+
+### Năm câu phải trả lời được trước khi sang Phase 6
+
+1. Trino đọc bảng Delta bằng connector nào — `hive` hay `delta_lake`? Khác nhau ở đâu?
+2. Vì sao container Trino có thể "healthy" mà một câu `SHOW SCHEMAS` vẫn lỗi?
+3. `catalog.schema.table` của Trino ánh xạ vào đâu trong Hive Metastore — có thật sự
+   tồn tại một tầng "catalog" ở đó không?
+4. Metastore nhúng (Derby) và metastore độc lập (Postgres + Thrift) khác nhau ở ĐÚNG
+   một chỗ nào khiến Trino dùng được cái này mà không dùng được cái kia?
+5. Superset lưu dashboard/chart ở đâu — trong Trino, hay một chỗ khác? Vì sao phải tách
+   hai cái đó ra?
+
+### Cầu nối sang Phase 6
+
+Hive Metastore giờ là một service thật, nhiều engine cùng trỏ vào — nhưng nó vẫn chỉ
+trả lời đúng một câu: *"bảng này ở đâu"*. Nó không biết **ai** được phép đọc
+`gold.gold_daily_zone_revenue`, không ghi lại **bảng này từ đâu ra** (lineage), và
+không có khái niệm "một tổ chức, nhiều catalog" — thứ Databricks thật cần khi một công
+ty có hàng trăm team.
+
+Đó là ba thứ Unity Catalog thêm vào, và Phase 6 sẽ tháo Hive Metastore ra để thay bằng
+nó — đúng lúc bảng so sánh ở Phần 1 nói "Hive Metastore là đồ cũ" bắt đầu có ý nghĩa
+thật, không còn là một dòng lý thuyết.

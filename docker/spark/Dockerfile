@@ -90,10 +90,4 @@ COPY spark-defaults.conf /opt/spark/conf/spark-defaults.conf
 # Thư mục Spark ghi log sự kiện và file shuffle tràn đĩa
 RUN mkdir -p /opt/spark/logs /opt/spark/work && chmod -R 777 /opt/spark/logs /opt/spark/work
 
-# Phase 4 — chỗ đặt Hive Metastore nhúng (Derby). Tạo sẵn ở đây, mode 777,
-# vì docker-compose mount một named volume vào đúng đường dẫn này: volume rỗng
-# sẽ kế thừa quyền của thư mục trong image. Không có bước này thì tiến trình
-# chạy bằng user `spark` không ghi nổi vào volume do root tạo.
-RUN mkdir -p /opt/spark/metastore && chmod 777 /opt/spark/metastore
-
 USER spark
