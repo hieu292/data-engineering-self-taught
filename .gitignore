@@ -29,3 +29,9 @@ derby.log
 .idea/
 .vscode/
 .DS_Store
+
+# dbt — artifact sinh ra khi chạy, không commit
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+dbt/.user.yml

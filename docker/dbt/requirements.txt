@@ -1,0 +1,13 @@
+# Phase 4 — dbt. Version đã kiểm trên PyPI, không phỏng đoán.
+#
+# dbt-core   : engine biên dịch Jinja+SQL, dựng DAG, chạy test. Không biết gì về Spark.
+# dbt-spark  : adapter — lớp dịch từ dbt sang phương ngữ SQL của Spark.
+#              Databricks dùng dbt-databricks, và nó chính là một nhánh rẽ (fork)
+#              của dbt-spark. Học cái này là học đúng cái kia.
+dbt-core==1.12.3
+dbt-spark==1.11.0
+
+# CHÚ Ý: KHÔNG cài `dbt-spark[session]` — extra đó kéo về `pyspark` đầy đủ
+# (~400MB + JVM). Ta chỉ cần client mỏng, đúng như image Jupyter ở Phase 3.
+# Version khớp server (apache/spark:4.1.3).
+pyspark-client==4.1.3

@@ -58,7 +58,7 @@ Databricks bằng chính ruột gan của nó.
 |---|---|---|
 | Iceberg thay Delta | Delta làm chính | Mục tiêu là clone Databricks. Nhưng dành một buổi riêng ở phase sau để so sánh — "Delta khác Iceberg chỗ nào" là câu phỏng vấn hay gặp |
 | Dagster thay Airflow | Airflow | Dagster thiết kế đẹp hơn, nhưng tin tuyển dụng hỏi Airflow nhiều gấp bội. Mục tiêu là xin việc |
-| Hive Metastore thay Unity Catalog | Unity Catalog | Hive Metastore là đồ cũ, đang chết dần |
+| Hive Metastore thay Unity Catalog | Unity Catalog | Hive Metastore là đồ cũ, đang chết dần. **Nhưng Phase 4-5 vẫn dùng nó làm đồ tạm** — chính việc tháo nó ra ở Phase 6 mới cho thấy Unity Catalog sinh ra để giải quyết gì. Xem Phần 7 |
 
 ### Xác nhận tương thích arm64
 
@@ -158,6 +158,11 @@ Dùng `apache/spark` chính thức, hoặc tự build image từ nó khi cần t
 Kiến trúc bronze/silver/gold. Chuyển logic transform từ script Python sang dbt models.
 Thêm dbt tests và dbt docs. **Xong khi:** `dbt build` chạy sạch, có test bắt được lỗi thật.
 
+> ✅ Đã xong. `dbt build` cho **21/21 node PASS** (5 model + 1 seed + 16 test), và ba
+> bài test đã bắt được lỗi thật ngay
+> lần chạy đầu (4 dòng trùng, 107.092 dòng mồ côi, thiếu giá trị borough hợp lệ).
+> Chi tiết ở [Phần 7](#phần-7--phase-4-chi-tiết-medallion--dbt).
+
 #### Phase 5 · Trino + Superset — 2 tuần
 Tầng SQL phục vụ BI, query liên kết nhiều nguồn, dashboard thật.
 **Xong khi:** analyst tưởng tượng có thể tự trả lời câu hỏi mà không cần bạn.
@@ -209,8 +214,8 @@ Gộp tất cả thành một dự án **kể được thành câu chuyện**:
 | 0 · Lát cắt mỏng | ✅ Xong | 2026-08-23 | `notebooks/00_thin_slice.ipynb` |
 | 1 · Storage & file format | ✅ Xong | 2026-08-23 | `notebooks/01_file_formats.ipynb` |
 | 2 · Delta Lake | ✅ Xong | 2026-08-23 | `notebooks/02_delta_lake.ipynb` |
-| 3 · Spark | 🟡 Đang làm | | `notebooks/03_spark.ipynb` |
-| 4 · Medallion + dbt | ⬜ | | |
+| 3 · Spark | ✅ Xong | 2026-08-23 | `notebooks/03_spark.ipynb` |
+| 4 · Medallion + dbt | ✅ Xong | 2026-08-24 | `notebooks/04_medallion_dbt.ipynb` + `dbt/` |
 | 5 · Trino + Superset | ⬜ | | |
 | 6 · Unity Catalog | ⬜ | | |
 | 7 · Airflow | ⬜ | | |
@@ -450,3 +455,158 @@ compute (Spark). Nhưng logic biến đổi dữ liệu vẫn nằm rải rác t
 không ai chạy lại được, không ai test được, không ai biết bảng nào phụ thuộc bảng nào.
 
 Đó là vấn đề Phase 4 giải: **medallion + dbt**.
+
+---
+
+## Phần 7 — Phase 4 chi tiết: Medallion + dbt
+
+> **Sổ tay:** `notebooks/04_medallion_dbt.ipynb`. Cần `make up` (build image dbt, ~1 phút)
+> rồi `make ingest` và `make dbt`.
+
+Phase 3 dựng tầng compute. Phase 4 dựng **tầng 6 — transform** và, lặng lẽ hơn nhưng
+quan trọng không kém, dựng luôn một mẩu **tầng 4 — catalog**.
+
+### Vì sao phải rời khỏi notebook
+
+Thử hỏi ba câu này về `03_spark.ipynb`: bảng `gold_borough` tính từ đâu qua mấy bước?
+Đổi bộ lọc ở giữa thì phải dựng lại những bảng nào? Làm sao biết kết quả hôm nay đúng?
+
+Không câu nào trả lời được. Đó là **giới hạn của notebook như công cụ sản xuất**: thứ
+tự chạy phụ thuộc người bấm chuột, không ai test được, không ai biết cái gì phụ thuộc
+cái gì. dbt giải đúng ba chuyện đó, và không giải gì khác.
+
+### Kiến trúc medallion — và ranh giới của dbt
+
+```
+raw/            bronze              silver               gold
+────────        ──────────────      ────────────────     ──────────────
+Parquet    →    nguyên trạng   →    sạch, đúng kiểu  →   trả lời câu hỏi
+của TLC         + 3 cột `_`         1 dòng = 1 chuyến    đã tổng hợp
+
+41.169.720      41.169.720          35.613.229           80.523 + 1.300
+
+script ingest   ────────── dbt lo từ đây trở đi ──────────────►
+```
+
+**dbt không nạp dữ liệu.** Chữ T trong ELT — Transform. Việc kéo file từ ngoài vào là
+E/L, thuộc về `scripts/ingest_bronze.py` (đời thật: Fivetran, Airbyte, Auto Loader).
+Trộn hai việc vào dbt là lỗi kiến trúc thường gặp, và nó phá luôn khả năng test:
+dbt không test nổi thứ nó tự nạp.
+
+Quy tắc mỗi tầng, gọn lại thành một dòng:
+
+| Tầng | Được làm gì | Cấm làm gì |
+|---|---|---|
+| bronze | chép nguyên trạng, thêm cột `_` | đổi tên cột, ép kiểu, lọc dòng |
+| silver | đổi tên, ép kiểu, **lọc** dòng vô lý | tổng hợp, **sửa** giá trị |
+| gold | tổng hợp theo câu hỏi nghiệp vụ | giữ độ mịn từng dòng |
+
+Silver **LỌC**, không **SỬA**. Đoán xem một chuyến giá âm "đáng lẽ" là bao nhiêu chính
+là bịa dữ liệu. Dòng bị loại vẫn nằm nguyên ở bronze.
+
+### Hai quyết định kiến trúc của phase này
+
+**1. dbt nối vào Spark bằng `method: session`, không dựng Thrift Server.**
+
+dbt-spark có bốn cách kết nối: `thrift`, `http`, `odbc`, `session`. Ba cách đầu đều cần
+dựng thêm một Spark Thrift Server. Không cần — Spark Connect đã là cái cổng đó rồi.
+Vì image dbt cài `pyspark-client` và có `SPARK_REMOTE`, "session" thực chất là một
+session **từ xa**. Kết quả: dbt và notebook dùng **chung một driver, chung một catalog**.
+Bảng dbt tạo, notebook thấy ngay.
+
+Điểm đáng nhớ cho phỏng vấn: Databricks dùng `dbt-databricks`, và nó chính là một
+**nhánh rẽ của `dbt-spark`**. Học cái này là học đúng cái kia.
+
+**2. Catalog tạm bằng Hive Metastore nhúng — và biết rõ nó tạm.**
+
+Từ Phase 4, `spark-defaults.conf` bật `spark.sql.catalogImplementation hive`, ghi vào
+Derby trên volume. Vì sao phải có: model incremental cần hỏi *"bảng này đã tồn tại
+chưa?"*, mà catalog mặc định `in-memory` thì danh sách bảng bốc hơi mỗi lần
+`spark-connect` khởi động lại.
+
+Đây mâu thuẫn có chủ đích với bảng "các lựa chọn đã loại" ở Phần 1. Hive Metastore
+đúng là đồ cũ, và chính vì thế nó ở đây: **Phase 6 sẽ tháo nó ra thay bằng Unity
+Catalog**, và lúc tháo mới thấy rõ UC sinh ra để giải quyết gì. Đọc bảng so sánh thì
+quên ngay; tự tay gỡ một thứ vì nó không đủ dùng thì nhớ mãi.
+
+### Tám bước
+
+- [ ] **1 · Bảng có TÊN thay vì đường dẫn** — `show databases`, `describe extended`.
+      Managed và external khác nhau ở đúng một chỗ: `DROP TABLE` có xoá file hay không.
+- [ ] **2 · Bronze và tổng điều tra chất lượng** — đếm rác TRƯỚC khi viết bộ lọc.
+      **13,5% dữ liệu là rác**, riêng `passenger_count = 0` đã chiếm gần 11%.
+- [ ] **3 · Một model dbt thực chất là gì** — mở `target/compiled/` và `target/run/`
+      đọc SQL thật. Gỡ lỗi dbt là **đọc file, không phải đoán**.
+- [ ] **4 · Chạy pipeline, đo cái phễu** — 41,1 triệu → 35,6 triệu → 80 nghìn dòng.
+      Kèm một cái bẫy nghiệp vụ: tỷ lệ boa chỉ đúng khi lọc riêng chuyến trả thẻ.
+- [ ] **5 · Test — biến "chạy được" thành "tin được"** ⭐ — bốn test dựng sẵn + singular
+      test đối chiếu tổng. Rồi tự tay làm một bài test đỏ bằng `--vars`.
+- [ ] **6 · SAI CÓ CHỦ ĐÍCH: pipeline không idempotent** ⭐ — `append` thay vì `merge`.
+      Chạy ba lần, dữ liệu ×3, mà dbt báo *"Completed successfully"* cả ba lần.
+- [ ] **7 · Lineage** — sơ đồ không ai vẽ, dbt suy từ `ref()`. Và `state:modified+`,
+      thứ khiến CI chạy 2 phút thay vì 2 tiếng.
+- [ ] **8 · dbt KHÔNG phải một engine** — container dbt không có JVM, không đọc byte nào
+      từ MinIO. Mở :4040 thấy job Spark do dbt sinh ra. Song song với bài học
+      "notebook không chứa driver" của Phase 3.
+
+### Bốn cái bẫy đã sập thật khi dựng phase này
+
+Ghi lại vì cả bốn đều mất thời gian thật, và cả bốn đều còn nguyên trong mã dưới dạng
+chú thích tại đúng chỗ gây ra chúng.
+
+| Bẫy | Triệu chứng | Nguyên nhân thật |
+|---|---|---|
+| Kiểu `INTERVAL` | `DELTA_UNSUPPORTED_DATA_TYPES` | `dropoff - pickup` ra kiểu INTERVAL, Delta không lưu được. Phải quy về số |
+| Dấu nháy trong seed | `PARSE_SYNTAX_ERROR at or near 's'` | "Governor's Island". `method: session` nội suy chuỗi trần, không thoát ký tự — **bug của adapter**, vá bằng macro trong dự án |
+| Lọc bảng chiều | test `relationships` đỏ **107.092 dòng** | `where Borough != 'Unknown'` xoá mất vùng 264. Bảng chiều phải ĐẦY ĐỦ |
+| `DROP TABLE` external | seed 265 dòng thành **530** | Drop bảng external không xoá file; create ngay sau đó nhận vơ dữ liệu cũ rồi chèn thêm |
+
+Cái bẫy thứ hai đáng nhớ nhất, không phải vì khó mà vì bài học đi kèm: **adapter cũng
+có bug, và dbt cho bạn vá nó ngay trong dự án** — khai lại đúng tên macro trong
+`macros/` là ghi đè được, không cần fork, không cần chờ bản vá thượng nguồn.
+
+### Ba bài test đã bắt được lỗi thật
+
+Không phải test cho có. Ba trong số 16 bài test đỏ ngay lần chạy đầu:
+
+1. `unique` trên `trip_id` → **4 dòng trùng hoàn toàn** trong 36 triệu dòng dữ liệu
+   gốc của TLC. Tỷ lệ chẳng ảnh hưởng doanh thu, nhưng đủ **làm chết job hàng đêm**:
+   MERGE đòi khoá duy nhất, một khoá khớp hai dòng nguồn là Delta ném lỗi.
+2. `relationships` → 107.092 dòng mồ côi (xem bảng bẫy ở trên).
+3. `accepted_values` trên `borough` → thiếu `Unknown` và `N/A`. Bài test này kiểm chứng
+   **hiểu biết của ta về dữ liệu** nhiều hơn là kiểm chứng dữ liệu.
+
+### Idempotency — ba cơ chế, ba tầng
+
+Đây là ý niệm quan trọng nhất Phase 4 để lại, và là cầu nối thẳng sang Phase 7.
+
+| Tầng | Cơ chế | Ở đâu |
+|---|---|---|
+| ingest | `replaceWhere` theo tháng | `scripts/ingest_bronze.py` |
+| silver | `MERGE` trên khoá duy nhất | `config(unique_key='trip_id')` |
+| gold | dựng lại toàn bộ | `+materialized: table` |
+
+Tầng gold dùng cách thô nhất — xoá đi dựng lại — và **đó là lựa chọn đúng**: 80 nghìn
+dòng dựng lại mất 15 giây, đổi lại là không bao giờ phải nghĩ về idempotency ở tầng đó
+nữa. Tối ưu sớm ở chỗ không đáng là một dạng nợ kỹ thuật.
+
+### Năm câu phải trả lời được trước khi sang Phase 5
+
+1. Vì sao bronze **không được** đổi tên cột cho đẹp?
+2. `dbt run` và `dbt build` khác nhau ở đâu, vì sao nên luôn dùng cái sau?
+3. Model A dùng `merge`, model B dùng `append`. Chạy pipeline hai lần, chuyện gì xảy ra
+   với từng cái — và cái nào báo lỗi cho bạn biết?
+4. `DROP TABLE` một bảng managed và một bảng external khác nhau thế nào?
+5. Muốn dbt chạy nhanh hơn thì sửa ở đâu? *(Bẫy: câu trả lời không nằm trong dbt.)*
+
+### Cầu nối sang Phase 5
+
+`gold_daily_zone_revenue` có 80.523 dòng — nhỏ, sạch, sẵn sàng cho dashboard. Nhưng để
+nhìn thấy nó, hiện vẫn phải mở notebook và biết viết PySpark. Không analyst nào làm vậy.
+
+Phase 5 dựng cổng **SQL thuần** cho họ: Trino + Superset.
+
+Và ở đó sẽ lộ ra đúng giới hạn của cái catalog tạm dựng hôm nay: **Hive Metastore nhúng
+bằng Derby chỉ một tiến trình JVM mở được**. Trino sẽ không nhìn thấy bảng nào cả. Đó
+chính là lúc câu hỏi *"vì sao cần Unity Catalog"* trở thành câu hỏi của bạn, chứ không
+còn là một dòng trong bảng so sánh ở Phần 1.

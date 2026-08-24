@@ -1,0 +1,9 @@
+version: 2
+
+seeds:
+  - name: taxi_zones
+    description: Bảng tra cứu vùng taxi của TLC. 265 dòng, nằm trong git.
+    config:
+      # Không khai kiểu thì dbt đoán, và nó hay đoán LocationID thành string.
+      column_types:
+        LocationID: int

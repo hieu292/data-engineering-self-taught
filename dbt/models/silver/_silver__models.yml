@@ -1,0 +1,59 @@
+version: 2
+
+models:
+  - name: silver_trips
+    description: >
+      Một dòng = một chuyến taxi hợp lệ. Đã đổi tên cột, ép kiểu, lọc dòng vô lý.
+      Chưa tổng hợp gì — mọi bảng gold đều xuất phát từ đây.
+    columns:
+      - name: trip_id
+        description: Khoá thay thế, md5 của 6 cột định danh chuyến.
+        data_tests:
+          # `unique` là bài test QUAN TRỌNG NHẤT của cả dự án. Nó vừa kiểm
+          # chất lượng dữ liệu, vừa canh gác chính cơ chế MERGE: unique_key
+          # mà trùng thì merge sẽ ném lỗi hoặc âm thầm ghi sai.
+          - unique
+          - not_null
+
+      - name: pickup_at
+        data_tests:
+          - not_null
+
+      - name: pickup_zone_id
+        description: Mã vùng đón.
+        data_tests:
+          # `relationships` = khoá ngoại. Kho dữ liệu không cưỡng chế khoá ngoại
+          # như Postgres, nên bài test này chính là thứ thay thế nó.
+          - relationships:
+              to: ref('silver_zones')
+              field: zone_id
+
+      - name: payment_type_id
+        description: 1=thẻ, 2=tiền mặt, 3=không tính tiền, 4=tranh chấp, 5=không rõ, 6=chuyến huỷ.
+        data_tests:
+          - accepted_values:
+              # Giá trị lạ xuất hiện = TLC đổi bảng mã mà không báo ai.
+              # Test này bắt được sự thay đổi ở phía NGUỒN — thứ không ai kiểm soát nổi.
+              values: [1, 2, 3, 4, 5, 6]
+              quote: false
+
+      - name: total_amount
+        data_tests:
+          - not_null
+
+  - name: silver_zones
+    description: 265 vùng taxi của New York, dùng làm bảng chiều.
+    columns:
+      - name: zone_id
+        data_tests:
+          - unique
+          - not_null
+      - name: borough
+        data_tests:
+          - accepted_values:
+              # 'Unknown' (vùng 264) và 'N/A' (vùng 265, ngoài địa phận NYC) là
+              # giá trị HỢP LỆ do chính TLC phát hành, không phải rác. Bản đầu
+              # của bài test này thiếu chúng và đỏ ngay — một lời nhắc rằng
+              # `accepted_values` kiểm chứng HIỂU BIẾT CỦA TA về dữ liệu nhiều
+              # hơn là kiểm chứng dữ liệu.
+              values: ['Manhattan', 'Brooklyn', 'Queens', 'Bronx', 'Staten Island', 'EWR', 'Unknown', 'N/A']

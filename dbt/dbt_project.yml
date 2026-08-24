@@ -1,0 +1,73 @@
+# ═══════════════════════════════════════════════════════════════
+#  Phase 4 · Medallion + dbt
+#
+#  File này là "hiến pháp" của dự án dbt: tên, chỗ tìm model, và cấu hình
+#  mặc định theo từng thư mục. Cấu hình ở đây có thể bị model ghi đè —
+#  càng gần model càng thắng.
+# ═══════════════════════════════════════════════════════════════
+name: lakehouse
+version: '1.0.0'
+profile: lakehouse
+
+model-paths: ["models"]
+seed-paths:  ["seeds"]
+test-paths:  ["tests"]
+macro-paths: ["macros"]
+
+clean-targets: ["target", "dbt_packages"]
+
+# ── Mặc định cho MỌI model ──────────────────────────────────────
+# file_format: delta  → không có dòng này dbt sẽ tạo bảng Parquet trần,
+#                       mất sạch ACID/time-travel của Phase 2.
+models:
+  lakehouse:
+    +file_format: delta
+
+    # Bronze không có model nào: bronze do script ingest ghi ra, dbt chỉ ĐỌC
+    # nó qua `sources`. Đó là ranh giới nghề nghiệp: dbt là công cụ TRANSFORM
+    # (chữ T trong ELT), không phải công cụ ingest.
+
+    silver:
+      +schema: silver
+      +location_root: s3a://lakehouse/phase4/silver
+
+    gold:
+      +schema: gold
+      +location_root: s3a://lakehouse/phase4/gold
+      +materialized: table
+
+    # Thư mục dạy học: nơi chứa model CỐ TÌNH SAI của bước 6.
+    # Không phải một phần của pipeline thật.
+    sandbox:
+      +schema: sandbox
+      +location_root: s3a://lakehouse/phase4/sandbox
+
+seeds:
+  lakehouse:
+    +schema: silver
+    +file_format: delta
+
+    # CHÚ Ý — KHÔNG khai `location_root` cho seed, dù mọi model đều có.
+    #
+    # Vì sao: dbt nạp lại seed bằng DROP TABLE rồi CREATE TABLE. Với bảng
+    # **external** (bảng có LOCATION tự khai), DROP TABLE chỉ xoá phần khai báo
+    # trong metastore — FILE TRÊN MINIO VẪN CÒN NGUYÊN. Câu CREATE ngay sau đó
+    # trỏ lại đúng thư mục cũ, nhận vơ luôn dữ liệu cũ, rồi insert thêm một bộ
+    # nữa. Kết quả có thật ở lần chạy đầu tiên: 265 dòng thành 530, và bài test
+    # `unique` trên zone_id đỏ đúng 265 dòng.
+    #
+    # Bỏ `location_root` đi thì bảng thành **managed**: Spark tự chọn chỗ trong
+    # `spark.sql.warehouse.dir` (vẫn trên MinIO, tại `s3a://lakehouse/warehouse/`)
+    # và DROP TABLE xoá luôn dữ liệu. Đó chính là toàn bộ khác biệt giữa hai loại:
+    #   managed  — metastore SỞ HỮU dữ liệu, drop là mất.
+    #   external — metastore chỉ TRỎ tới dữ liệu, drop chỉ mất cái trỏ.
+    # Câu hỏi phỏng vấn kinh điển, và đây là lý do người ta hỏi nó.
+
+# Biến dùng chung. Ghi đè lúc chạy: dbt build --vars '{start_date: "2024-03-01"}'
+vars:
+  start_date: '2024-01-01'
+  end_date:   '2025-01-01'
+
+  # Trần thời lượng một chuyến taxi. Nới ra để thấy bài test đối chiếu đỏ lên:
+  #   dbt build --vars '{max_trip_hours: 999}'
+  max_trip_hours: 12

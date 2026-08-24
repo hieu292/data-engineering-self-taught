@@ -1,0 +1,29 @@
+# ═══════════════════════════════════════════════════════════════
+#  `sources` = cửa vào của dbt. Đây là những bảng dbt KHÔNG tạo ra, chỉ đọc.
+#
+#  Khai báo source có ba cái lợi, và cái thứ ba mới là quan trọng nhất:
+#    1. `{{ source(...) }}` thay cho tên bảng cứng → đổi chỗ chỉ sửa một nơi.
+#    2. Source hiện lên trong sơ đồ lineage với hình dạng riêng.
+#    3. Test chạy được TRÊN source — bắt lỗi ngay tại cửa, trước khi nó
+#       kịp chảy xuống silver và gold.
+# ═══════════════════════════════════════════════════════════════
+version: 2
+
+sources:
+  - name: bronze
+    description: >
+      Bản sao nguyên trạng dữ liệu NYC Yellow Taxi 2024, do
+      `scripts/ingest_bronze.py` ghi ra. dbt không bao giờ ghi vào đây.
+    schema: bronze
+    tables:
+      - name: yellow_trips
+        description: Mỗi dòng là một chuyến taxi vàng, y hệt file gốc của TLC.
+        columns:
+          - name: tpep_pickup_datetime
+            description: Giờ đồng hồ tính tiền BẬT. Chưa được làm sạch — có cả năm 2002 và 2090.
+          - name: PULocationID
+            description: Mã vùng đón, khớp `LocationID` trong bảng zone của TLC.
+          - name: _source_file
+            description: File nguồn sinh ra dòng này. Cột do tầng ingest thêm.
+            data_tests:
+              - not_null

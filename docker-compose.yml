@@ -123,6 +123,11 @@ services:
     ports:
       - "${SPARK_CONNECT_PORT}:15002"   # gRPC: notebook nối vào bằng cổng này
       - "${SPARK_APP_UI_PORT}:4040"     # Spark UI — cổng quan trọng nhất Phase 3
+    volumes:
+      # Phase 4: Hive Metastore nhúng. Không có volume này thì danh sách bảng
+      # biến mất mỗi lần container khởi động lại — dữ liệu trên MinIO còn nguyên
+      # nhưng không ai nhớ nó là bảng gì nữa.
+      - spark-metastore:/opt/spark/metastore
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:4040 > /dev/null"]
       interval: 10s
@@ -152,14 +157,42 @@ services:
     volumes:
       - ./notebooks:/home/jovyan/work
       - ./data:/home/jovyan/data
+      # Phase 4: notebook đọc được mã nguồn dbt và SQL đã biên dịch trong
+      # target/. Chỉ ĐỌC — dbt chạy ở container riêng, notebook không sửa gì.
+      - ./dbt:/home/jovyan/dbt:ro
     command: >
       start-notebook.py
       --IdentityProvider.token='${JUPYTER_TOKEN}'
       --ServerApp.root_dir=/home/jovyan/work
     networks: [lakehouse]
 
+  # ═══════════════════════════════════════════════════════════════
+  #  Tầng 6: Transform. Databricks gọi tầng này là Workflows / DLT.
+  #  Phase 7 sẽ thêm Airflow bên cạnh — dbt lo "biến đổi thế nào",
+  #  Airflow lo "chạy lúc nào, theo thứ tự nào". Hai việc khác nhau.
+  # ═══════════════════════════════════════════════════════════════
+  dbt:
+    build: ./docker/dbt
+    image: lakehouse/dbt:1.12.3
+    container_name: lakehouse-dbt
+    depends_on:
+      spark-connect: { condition: service_healthy }
+    environment:
+      # Cùng một biến notebook dùng ở Phase 3. dbt và notebook nói chuyện với
+      # ĐÚNG một driver, nên bảng bên này tạo là bên kia thấy ngay.
+      SPARK_REMOTE: sc://spark-connect:15002
+      LAKEHOUSE_BUCKET: ${MINIO_BUCKET}
+      DBT_PROFILES_DIR: /dbt
+    volumes:
+      - ./dbt:/dbt
+      - ./scripts:/scripts:ro
+    ports:
+      - "${DBT_DOCS_PORT}:8081"    # `make dbt-docs` — sơ đồ lineage của cả pipeline
+    networks: [lakehouse]
+
 volumes:
   minio-data:
+  spark-metastore:
 
 networks:
   lakehouse:

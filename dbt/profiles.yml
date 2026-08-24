@@ -1,0 +1,26 @@
+# ═══════════════════════════════════════════════════════════════
+#  Kết nối. Trong đời thật file này nằm ở ~/.dbt/profiles.yml và KHÔNG
+#  commit — vì thường chứa token. Ở đây không có bí mật nào (thông tin
+#  đăng nhập MinIO do docker-compose cấp qua biến môi trường cho
+#  spark-connect, dbt không cầm key), nên để cạnh dự án cho dễ đọc.
+# ═══════════════════════════════════════════════════════════════
+lakehouse:
+  target: dev
+  outputs:
+    dev:
+      type: spark
+
+      # method: session — dbt gọi thẳng API SparkSession của Python.
+      # Vì image này cài `pyspark-client` và biến SPARK_REMOTE đã trỏ tới
+      # sc://spark-connect:15002, "session" đó thực chất là một session TỪ XA.
+      # Kết quả: dbt và notebook dùng CHUNG một driver, chung một catalog.
+      #
+      # Ba lựa chọn còn lại của dbt-spark (thrift/http/odbc) đều cần dựng thêm
+      # một Thrift Server. Không cần, vì Spark Connect đã là cái cổng đó rồi.
+      method: session
+      host: NA          # bắt buộc phải có trong schema của adapter, không dùng tới
+      schema: silver    # schema mặc định khi model không khai gì khác
+
+      # 4 core toàn cluster → chạy song song hơn 4 model là vô nghĩa,
+      # chúng chỉ giành nhau task slot.
+      threads: 4
