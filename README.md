@@ -3,7 +3,7 @@
 Dựng lại kiến trúc Databricks bằng các công nghệ mã nguồn mở, từng tầng một, để hiểu
 data platform hiện đại hoạt động thế nào.
 
-📍 **Đang ở: Phase 4 — Medallion + dbt** · Lộ trình đầy đủ: [docs/roadmap.md](docs/roadmap.md)
+📍 **Đang ở: Phase 5 — Trino + Superset** · Lộ trình đầy đủ: [docs/roadmap.md](docs/roadmap.md)
 
 ## Chạy thử
 

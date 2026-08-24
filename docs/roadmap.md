@@ -531,21 +531,21 @@ quên ngay; tự tay gỡ một thứ vì nó không đủ dùng thì nhớ mãi
 
 ### Tám bước
 
-- [ ] **1 · Bảng có TÊN thay vì đường dẫn** — `show databases`, `describe extended`.
+- [x] **1 · Bảng có TÊN thay vì đường dẫn** — `show databases`, `describe extended`.
       Managed và external khác nhau ở đúng một chỗ: `DROP TABLE` có xoá file hay không.
-- [ ] **2 · Bronze và tổng điều tra chất lượng** — đếm rác TRƯỚC khi viết bộ lọc.
+- [x] **2 · Bronze và tổng điều tra chất lượng** — đếm rác TRƯỚC khi viết bộ lọc.
       **13,5% dữ liệu là rác**, riêng `passenger_count = 0` đã chiếm gần 11%.
-- [ ] **3 · Một model dbt thực chất là gì** — mở `target/compiled/` và `target/run/`
+- [x] **3 · Một model dbt thực chất là gì** — mở `target/compiled/` và `target/run/`
       đọc SQL thật. Gỡ lỗi dbt là **đọc file, không phải đoán**.
-- [ ] **4 · Chạy pipeline, đo cái phễu** — 41,1 triệu → 35,6 triệu → 80 nghìn dòng.
+- [x] **4 · Chạy pipeline, đo cái phễu** — 41,1 triệu → 35,6 triệu → 80 nghìn dòng.
       Kèm một cái bẫy nghiệp vụ: tỷ lệ boa chỉ đúng khi lọc riêng chuyến trả thẻ.
-- [ ] **5 · Test — biến "chạy được" thành "tin được"** ⭐ — bốn test dựng sẵn + singular
+- [x] **5 · Test — biến "chạy được" thành "tin được"** ⭐ — bốn test dựng sẵn + singular
       test đối chiếu tổng. Rồi tự tay làm một bài test đỏ bằng `--vars`.
-- [ ] **6 · SAI CÓ CHỦ ĐÍCH: pipeline không idempotent** ⭐ — `append` thay vì `merge`.
+- [x] **6 · SAI CÓ CHỦ ĐÍCH: pipeline không idempotent** ⭐ — `append` thay vì `merge`.
       Chạy ba lần, dữ liệu ×3, mà dbt báo *"Completed successfully"* cả ba lần.
-- [ ] **7 · Lineage** — sơ đồ không ai vẽ, dbt suy từ `ref()`. Và `state:modified+`,
+- [x] **7 · Lineage** — sơ đồ không ai vẽ, dbt suy từ `ref()`. Và `state:modified+`,
       thứ khiến CI chạy 2 phút thay vì 2 tiếng.
-- [ ] **8 · dbt KHÔNG phải một engine** — container dbt không có JVM, không đọc byte nào
+- [x] **8 · dbt KHÔNG phải một engine** — container dbt không có JVM, không đọc byte nào
       từ MinIO. Mở :4040 thấy job Spark do dbt sinh ra. Song song với bài học
       "notebook không chứa driver" của Phase 3.
 
