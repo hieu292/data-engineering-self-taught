@@ -46,10 +46,30 @@ services:
 
 
   # ═══════════════════════════════════════════════════════════════
-  #  Tầng 4: Catalog. Phase 4 dùng Derby NHÚNG trong JVM spark-connect —
-  #  chỉ MỘT tiến trình mở được. Từ Phase 5, catalog tách thành service
-  #  riêng (Hive Metastore, ghi vào Postgres) để Spark VÀ Trino cùng trỏ
-  #  vào một chỗ. Đây là bản nháp của Unity Catalog ở Phase 6.
+  #  Tầng 4: Catalog. Phase 4 dùng Derby NHÚNG trong JVM spark-connect — chỉ
+  #  MỘT tiến trình mở được. Phase 5 tách ra thành Hive Metastore độc lập
+  #  (Thrift + Postgres) — một service thật, nhưng vẫn chỉ biết "bảng nào ở
+  #  đâu", không phân quyền, không catalog ba tầng.
+  #
+  #  Phase 6 ĐỊNH tháo hẳn Hive Metastore, thay bằng Unity Catalog OSS. Thử
+  #  thật thì vỡ: unitycatalog-spark KHÔNG đọc/ghi dữ liệu qua credential có
+  #  sẵn của Spark — nó luôn tự vend "temporary credentials" qua REST API
+  #  riêng, và bản OSS phát hành chính thức (v0.6.0) CHƯA hỗ trợ custom S3
+  #  endpoint (MinIO) trong luồng đó (đã kiểm bằng tay: MinIO từ chối token
+  #  giả với "InvalidTokenId"; hỗ trợ MinIO mới nằm ở một nhánh thử nghiệm
+  #  chưa merge). Nghĩa là: qua Spark, Unity Catalog CHỈ dùng được để xem
+  #  metadata (SHOW SCHEMAS/TABLES) — mọi thao tác chạm dữ liệu thật
+  #  (SELECT/CREATE/INSERT) đều lỗi ngay ở bước xin credential.
+  #
+  #  Quyết định thật cho phase này: giữ CẢ HAI. Hive Metastore vẫn là nơi
+  #  Spark/dbt/Trino đọc-ghi dữ liệu (không đổi từ Phase 5). Unity Catalog
+  #  đứng cạnh làm tầng GOVERNANCE — catalog ba tầng thật, authorization BẬT
+  #  thật (server.properties ghi đè, ảnh gốc mặc định tắt), GRANT/REVOKE có ý
+  #  nghĩa thật — được nạp bằng cách ĐĂNG KÝ metadata các bảng thật qua REST
+  #  API (không qua Spark), xem `scripts/register_unity_catalog.py`. Đây
+  #  không phải một cách né lỗi — nó là bức tranh trung thực: OSS ghép từ
+  #  nhiều mã nguồn không phải lúc nào cũng khớp nhau hoàn hảo, và biết CHÍNH
+  #  XÁC ranh giới đó là kỹ năng thật của một data engineer.
   # ═══════════════════════════════════════════════════════════════
   postgres:
     image: postgres:17
@@ -59,9 +79,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_METASTORE_DB}
       # Đọc bởi docker/postgres/init/01-create-superset-db.sh — chạy một
-      # lần lúc volume postgres-data còn trống, tạo thêm DB thứ hai cho
-      # Superset trong CÙNG một Postgres.
+      # lần lúc volume postgres-data còn trống, tạo thêm hai DB cho Superset
+      # và Unity Catalog trong CÙNG một Postgres.
       POSTGRES_SUPERSET_DB: ${POSTGRES_SUPERSET_DB}
+      POSTGRES_UNITY_DB: ${POSTGRES_UNITY_DB}
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
@@ -72,10 +93,9 @@ services:
       retries: 20
     networks: [lakehouse]
 
-  # ── Hive Metastore ĐỘC LẬP — thrift://:9083. Không phải Hive engine
-  # (thứ đã chết), chỉ là một schema SQL lưu "bảng nào, cột gì, ở đâu".
-  # Entrypoint gốc của ảnh tự chạy schematool -initOrUpgradeSchema mỗi lần
-  # khởi động — idempotent, không cần bước init riêng như minio-init.
+  # ── Hive Metastore ĐỘC LẬP — thrift://:9083. Nơi Spark/dbt/Trino thật sự
+  # đọc-ghi bảng (không đổi từ Phase 5). Entrypoint gốc của ảnh tự chạy
+  # schematool -initOrUpgradeSchema mỗi lần khởi động — idempotent.
   hive-metastore:
     build: ./docker/hive-metastore
     image: lakehouse/hive-metastore:4.0.0
@@ -100,6 +120,38 @@ services:
       # Chưa có curl/nc trong ảnh — /dev/tcp là built-in của bash, đủ để
       # biết cổng Thrift đã mở hay chưa.
       test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/9083'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks: [lakehouse]
+
+  # ── Unity Catalog OSS — tầng GOVERNANCE, KHÔNG phục vụ đọc/ghi dữ liệu
+  # (xem khối ghi chú phía trên). REST API thật, catalog ba tầng, và
+  # authorization BẬT thật (server.properties ghi đè) nên GRANT/REVOKE có ý
+  # nghĩa — ảnh gốc mặc định tắt, coi mọi request là admin.
+  unity-catalog:
+    build: ./docker/unity-catalog
+    image: lakehouse/unity-catalog:0.6.0
+    container_name: lakehouse-unity-catalog
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      POSTGRES_UNITY_DB: ${POSTGRES_UNITY_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Đọc bởi server.properties — dù không dùng để phục vụ dữ liệu thật,
+      # vẫn khai để notebook tự tay tái hiện lỗi credential (bước "sai có
+      # chủ đích") mà không cần sửa file cấu hình.
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${UNITY_CATALOG_PORT}:8080"
+    healthcheck:
+      # Chưa có curl trong ảnh (Alpine) — /dev/tcp built-in của bash, đủ để
+      # biết cổng REST đã mở hay chưa.
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/8080'"]
       interval: 5s
       timeout: 5s
       retries: 30
@@ -175,12 +227,14 @@ services:
       spark-worker-2: { condition: service_started }
       minio-init: { condition: service_completed_successfully }
       hive-metastore: { condition: service_healthy }
+      unity-catalog: { condition: service_healthy }
     command: >
       /opt/spark/sbin/start-connect-server.sh
       --master spark://spark-master:7077
       --conf spark.driver.host=spark-connect
       --conf spark.connect.grpc.binding.port=15002
       --conf spark.ui.port=4040
+      --conf spark.sql.catalog.unity.token=${UC_ADMIN_TOKEN}
     environment: *spark-env
     ports:
       - "${SPARK_CONNECT_PORT}:15002"   # gRPC: notebook nối vào bằng cổng này
@@ -201,6 +255,7 @@ services:
       minio-init: { condition: service_completed_successfully }
       spark-connect: { condition: service_healthy }
       trino: { condition: service_healthy }
+      unity-catalog: { condition: service_healthy }
     environment:
       # Biến chuẩn AWS — boto3/s3fs/duckdb đều tự đọc, không cần hardcode key trong code
       AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
@@ -214,6 +269,10 @@ services:
       # tên service; một analyst thật ngồi ngoài máy sẽ dùng localhost:${TRINO_PORT}.
       TRINO_HOST: trino
       TRINO_PORT: "8080"
+      # Phase 6 — REST API thuần (urllib đủ dùng, không cần cài thêm gì).
+      UNITY_CATALOG_URL: http://unity-catalog:8080
+      UC_ADMIN_TOKEN: ${UC_ADMIN_TOKEN}
+      UC_ANALYST_TOKEN: ${UC_ANALYST_TOKEN}
     ports:
       - "${JUPYTER_PORT}:8888"
     volumes:
@@ -239,12 +298,18 @@ services:
     container_name: lakehouse-dbt
     depends_on:
       spark-connect: { condition: service_healthy }
+      unity-catalog: { condition: service_healthy }
     environment:
       # Cùng một biến notebook dùng ở Phase 3. dbt và notebook nói chuyện với
       # ĐÚNG một driver, nên bảng bên này tạo là bên kia thấy ngay.
       SPARK_REMOTE: sc://spark-connect:15002
       LAKEHOUSE_BUCKET: ${MINIO_BUCKET}
       DBT_PROFILES_DIR: /dbt
+      # Phase 6 — đọc bởi scripts/register_unity_catalog.py (`make uc-register`):
+      # đăng ký metadata các bảng dbt vừa dựng vào Unity Catalog qua REST,
+      # KHÔNG qua Spark (xem lý do trong docker-compose.yml, service unity-catalog).
+      UNITY_CATALOG_URL: http://unity-catalog:8080
+      UC_ADMIN_TOKEN: ${UC_ADMIN_TOKEN}
     volumes:
       - ./dbt:/dbt
       - ./scripts:/scripts:ro
@@ -256,9 +321,9 @@ services:
   #  Tầng 5: SQL warehouse. Databricks gọi là "SQL Warehouse (Photon)".
   #  Trino KHÔNG tính toán qua Spark — nó là engine SQL riêng, đọc thẳng
   #  Delta transaction log (connector delta_lake), chỉ mượn Hive Metastore
-  #  để biết bảng nằm ở đâu. Đây là ý nghĩa thật của "Delta là định dạng
-  #  mở": ba engine khác nhau (delta-rs, Spark, Trino) cùng đọc một bộ
-  #  file, không engine nào sở hữu riêng.
+  #  để biết bảng nằm ở đâu — KHÔNG đổi từ Phase 5. Trino OSS không có
+  #  connector nói thẳng được với Unity Catalog (chỉ Iceberg REST API của
+  #  nó, và cần UniForm — xem docs/roadmap.md Phần 9 vì sao chưa đáng làm).
   # ═══════════════════════════════════════════════════════════════
   trino:
     image: trinodb/trino:476

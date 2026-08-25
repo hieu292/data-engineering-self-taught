@@ -1,0 +1,20 @@
+# Ảnh gốc mặc định ghi vào H2 (file DB nhúng trong chính container) — mất
+# sạch mỗi lần xoá container, giống hệt vấn đề Derby của Phase 4. Đổi sang
+# Postgres dùng chung với Superset trong cùng service `postgres`. Driver JDBC
+# cho Postgres đã có sẵn trong classpath ảnh gốc (kiểm chứng bằng cách tìm
+# trong cache Coursier của image trước khi viết dòng này).
+#
+# File .properties chuẩn của Java KHÔNG tự nội suy biến môi trường (khác
+# Hadoop `${env.VAR}` hay Trino `${ENV:VAR}`) — placeholder __X__ dưới đây
+# được entrypoint.sh thay bằng giá trị thật lúc container khởi động.
+hibernate.connection.driver_class=org.postgresql.Driver
+hibernate.connection.url=jdbc:postgresql://postgres:5432/__POSTGRES_UNITY_DB__
+hibernate.connection.username=__POSTGRES_USER__
+hibernate.connection.password=__POSTGRES_PASSWORD__
+
+hibernate.hbm2ddl.auto=update
+hibernate.show_sql=false
+hibernate.archive.autodetection=class
+hibernate.use_sql_comments=true
+org.hibernate.SQL=INFO
+org.hibernate.type.descriptor.sql.BasicBinder=TRACE

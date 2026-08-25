@@ -30,6 +30,18 @@ ARG HADOOP_VERSION=3.4.2
 ARG AWS_SDK_VERSION=2.29.52
 ARG DELTA_VERSION=4.3.1
 
+# unitycatalog-spark_4.1_2.13 — CHÚ Ý cái "_4.1_" giữa tên: khác artifact hẳn
+# với unitycatalog-spark_2.13 (không có số Spark). Tìm nhầm bản không có số
+# Spark (build cho spark-sql 4.0.0, lệch với 4.1.3 của image này) là bài học
+# đầu — nhưng chưa đủ: CREATE TABLE vẫn vỡ với
+# "java.lang.NoClassDefFoundError: io/unitycatalog/client/delta/model/DeltaTableUpdate"
+# dù đã dùng đúng bản _4.1_. Lớp đó nằm trong unitycatalog-client, và chỉ xuất
+# hiện đủ khi Ivy giải luôn CẢ delta-kernel-unitycatalog (UC Delta API — Delta
+# 4.3.1 dùng để tạo/commit bảng qua catalog thay vì ghi thẳng file). Bài học
+# thật: `unitycatalog-spark` một mình không đủ, phải kéo theo mô-đun Delta
+# phía UC cần, và version PHẢI khớp `${DELTA_VERSION}` ở trên.
+ARG UC_SPARK_VERSION=0.6.0
+
 ARG MVN=https://repo1.maven.org/maven2
 
 # Tải jar vào lúc BUILD, không dùng `--packages` lúc chạy. Hai lý do:
@@ -51,6 +63,50 @@ RUN set -eux; \
       echo "→ $(basename "$url")"; \
       curl -fsSL --retry 3 -O "$url"; \
     done
+
+# unitycatalog-spark KHÔNG tự tay curl như trên được: nó kéo theo ~25 jar phụ
+# thuộc bắc cầu (jackson, antlr4, hadoop-client, log4j...) — dò tay chắc chắn
+# thiếu sót. Thay vào đó, dùng chính `--packages` của Spark để Ivy giải đúng
+# cây phụ thuộc, nhưng chạy LÚC BUILD (nhắm một class không tồn tại — Ivy
+# resolve xong TRƯỚC khi thử nạp class, nên vẫn lấy được jar dù lệnh báo lỗi
+# ở bước sau) rồi copy jar ra /opt/spark/jars. Runtime vẫn không cần mạng.
+#
+# Đã kiểm tra bằng tay: image gốc SẴN CÓ bản MỚI HƠN của jackson-*, log4j-*,
+# slf4j-api, snappy-java, hadoop-client-api/runtime (dò `ls /opt/spark/jars`
+# rồi so với jar Ivy resolve ra) — copy đè bản CŨ hơn Ivy kéo về sẽ tạo ra hai
+# bản trùng tên khác version trên classpath, đúng loại lỗi "chạy được ở chỗ
+# này, vỡ ở chỗ khác" dự án này đã né được với hadoop-aws. Chỉ copy đúng
+# những jar image gốc CHƯA có.
+RUN set -eux; \
+    /opt/spark/bin/spark-submit \
+      --packages "io.unitycatalog:unitycatalog-spark_4.1_2.13:${UC_SPARK_VERSION},io.delta:delta-kernel-unitycatalog:${DELTA_VERSION}" \
+      --conf spark.jars.ivy=/opt/spark/.ivy2 \
+      --class does.not.Exist \
+      /opt/spark/jars/delta-storage-${DELTA_VERSION}.jar > /tmp/uc-resolve.log 2>&1 || true; \
+    grep -q "Failed to load class" /tmp/uc-resolve.log \
+      || (cat /tmp/uc-resolve.log; echo "FAIL: spark-submit không tới được bước nạp class — Ivy resolve có thể đã lỗi"; exit 1); \
+    cd /opt/spark/.ivy2/jars; \
+    for jar in \
+      io.unitycatalog_unitycatalog-spark_4.1_2.13-${UC_SPARK_VERSION}.jar \
+      io.unitycatalog_unitycatalog-client-${UC_SPARK_VERSION}.jar \
+      io.unitycatalog_unitycatalog-hadoop-${UC_SPARK_VERSION}.jar \
+      io.delta_delta-kernel-unitycatalog-${DELTA_VERSION}.jar \
+      com.ibm.icu_icu4j-72.1.jar \
+      commons-logging_commons-logging-1.3.0.jar \
+      org.abego.treelayout_org.abego.treelayout.core-1.0.3.jar \
+      org.antlr_ST4-4.3.4.jar \
+      org.antlr_antlr4-4.13.1.jar \
+      com.fasterxml.jackson.dataformat_jackson-dataformat-xml-2.15.0.jar \
+      org.openapitools_jackson-databind-nullable-0.2.6.jar \
+      com.thoughtworks.paranamer_paranamer-2.8.jar \
+      com.fasterxml.woodstox_woodstox-core-6.5.1.jar \
+      org.codehaus.woodstox_stax2-api-4.2.1.jar \
+      com.google.code.findbugs_jsr305-3.0.2.jar \
+    ; do \
+      cp "$jar" /opt/spark/jars/; \
+    done; \
+    chmod -R a+rX /opt/spark/jars; \
+    rm -rf /opt/spark/.ivy2 /tmp/uc-resolve.log
 
 # ── Vá lệch version Python giữa client và executor ─────────────
 #

@@ -3,7 +3,7 @@
 Dựng lại kiến trúc Databricks bằng các công nghệ mã nguồn mở, từng tầng một, để hiểu
 data platform hiện đại hoạt động thế nào.
 
-📍 **Đang ở: Phase 5 — Trino + Superset** · Lộ trình đầy đủ: [docs/roadmap.md](docs/roadmap.md)
+📍 **Đang ở: Phase 6 — Unity Catalog** · Lộ trình đầy đủ: [docs/roadmap.md](docs/roadmap.md)
 
 ## Chạy thử
 
@@ -23,6 +23,7 @@ make dbt       # bronze → silver → gold, kèm 16 bài test
 | dbt docs + lineage | http://localhost:8081 | sau khi chạy `make dbt-docs` |
 | Trino | http://localhost:8082 | — (`make trino-shell` để vào CLI) |
 | Superset | http://localhost:8088 | `admin` / xem `SUPERSET_ADMIN_PASSWORD` trong `.env` |
+| Unity Catalog | http://localhost:8089 | PAT tự ký — `make uc-token` |
 
 ```bash
 make              # xem tất cả lệnh
@@ -30,6 +31,8 @@ make cluster      # kiểm tra worker Spark nào đang ALIVE
 make dbt-docs     # sinh tài liệu + sơ đồ lineage
 make dbt-shell    # vào container dbt, chạy lệnh dbt tuỳ ý
 make trino-shell  # vào Trino CLI, catalog delta sẵn
+make uc-register  # đăng ký metadata bảng thật vào Unity Catalog (sau 'make dbt')
+make uc-token     # tự ký PAT Unity Catalog mới (PRINCIPAL=... để đổi principal)
 make down         # dừng, giữ dữ liệu
 make clean        # dừng và xoá sạch dữ liệu MinIO
 ```
@@ -46,6 +49,7 @@ Chạy theo thứ tự — mỗi notebook dựa trên thứ notebook trước đ
 | `03_spark.ipynb` | driver/executor, lazy evaluation, shuffle, data skew, broadcast join |
 | `04_medallion_dbt.ipynb` | bronze/silver/gold, model + test dbt, lineage, idempotency |
 | `05_trino_superset.ipynb` | SQL qua Trino không cần Spark, catalog.schema.table, dashboard Superset |
+| `06_unity_catalog.ipynb` | Catalog ba tầng, phân quyền GRANT thật, và giới hạn thật của UC OSS với MinIO |
 
 Cách học chung cho cả năm: **chạy cell → nhìn số của chính mình → rồi mới đọc giải thích.**
 Mỗi phase đều có ít nhất một bước **sai có chủ đích** — làm hỏng trước, đo, rồi tự chữa.
@@ -56,40 +60,50 @@ Mỗi phase đều có ít nhất một bước **sai có chủ đích** — là
   Tầng 7 · Consumption    →  JupyterLab      ✅ Phase 0   (+ Superset: Phase 5)
   Tầng 6 · Transform      →  dbt             ✅ Phase 4   (Airflow: Phase 7)
   Tầng 5 · SQL warehouse  →  Trino           ✅ Phase 5
-  Tầng 4 · Catalog        →  Unity Catalog      Phase 6   (tạm: Hive Metastore độc lập)
+  Tầng 4 · Catalog        →  Unity Catalog   ✅ Phase 6   (governance — dữ liệu thật vẫn qua Hive Metastore, xem dưới)
   Tầng 3 · Compute        →  Apache Spark    ✅ Phase 3
   Tầng 2 · Table format   →  Delta Lake      ✅ Phase 2
   Tầng 1 · Object storage →  MinIO           ✅ Phase 0
 ```
 
-Mười một container đang chạy:
+Mười hai container đang chạy:
 
 ```
 jupyter ──sc://15002──┐
   pyspark-client      │
   (không có JVM)      ├──► spark-connect (DRIVER) ──7077──► spark-master
-                      │          │                              │
-dbt   ──sc://15002────┘      UI :4040                    ┌──────┴──────┐
-  dbt-core + adapter                                  worker-1      worker-2
-  (không có JVM)                                      2 core/3GB    2 core/3GB
-                                                            │             │
-trino ──HTTP :8080──┐                                      └── s3a:// ───┴──► minio
-  (engine SQL riêng, │
-   không qua Spark)  │
-                      ├──► hive-metastore ──9083──┐
-spark-connect ────────┘    (Thrift service)        ├──► postgres
-                                                     │    (metastore_db + superset_meta)
-superset ──sqlalchemy-trino──► trino               │
-  (dashboard, đọc metadata riêng) ───────────────────┘
+                      │          │      │                       │
+dbt   ──sc://15002────┘      UI :4040   │                ┌──────┴──────┐
+  dbt-core + adapter                    │             worker-1      worker-2
+  (không có JVM)                        │             2 core/3GB    2 core/3GB
+                                         │                   │             │
+trino ──HTTP :8080──┐                   │                   └── s3a:// ───┴──► minio
+  (engine SQL riêng, │                  │
+   không qua Spark)  │                  ├──► hive-metastore ──9083──┐
+                      ├──► hive-metastore   (Thrift — DỮ LIỆU thật)  ├──► postgres
+                      │                                              │   (metastore_db +
+superset ──sqlalchemy-trino──► trino                                 │    unitycatalog_db +
+  (dashboard, đọc metadata riêng) ────────────────────────────────────┘    superset_meta)
+                                         │
+                      unity.* (browse)  ▼
+                      spark-connect ──REST :8080──► unity-catalog
+                                         (GOVERNANCE — metadata thôi, xem "Một catalog" dưới)
 ```
 
 **Hai client, một driver.** Cả notebook lẫn dbt đều không chứa Spark — không JVM, không
 tính toán. Chúng gửi mô tả phép tính qua gRPC tới container `spark-connect`. Đó là mô hình
 Databricks Connect, và là lý do cả hai image đều cài `pyspark-client` chứ không phải `pyspark`.
 
-**Một catalog, nhiều engine.** Từ Phase 5, `spark-connect` và `trino` không còn tự giữ
-catalog riêng — cả hai là client của service `hive-metastore` (Thrift, ghi vào Postgres).
-Bảng dbt tạo qua Spark, Trino thấy ngay; không cần đồng bộ, không cần export/import.
+**Một catalog cho dữ liệu, một catalog cho governance.** `spark-connect` và `trino` đọc-ghi
+dữ liệu thật qua `hive-metastore` (Thrift, ghi vào Postgres) — không đổi từ Phase 5. Kế
+hoạch Phase 6 là thay hẳn bằng Unity Catalog; thử thật thì vỡ: `unitycatalog-spark` luôn tự
+xin Unity Catalog "vend" credential S3 tạm thời cho mọi thao tác chạm dữ liệu, và bản UC OSS
+phát hành chính thức (v0.6.0) chưa hỗ trợ custom S3 endpoint (MinIO) trong luồng đó — MinIO
+từ chối thẳng token giả với `InvalidTokenId` (tự tay kiểm bằng `aws-cli`, không phải suy
+đoán). Quyết định thật: Unity Catalog đứng CẠNH làm tầng governance thật — catalog ba tầng,
+GRANT/REVOKE có tác dụng thật — nạp bằng cách đăng ký metadata các bảng thật qua REST API
+(`scripts/register_unity_catalog.py`), không qua Spark. Chi tiết đầy đủ:
+[Phần 9 của roadmap](docs/roadmap.md) và `notebooks/06_unity_catalog.ipynb`.
 
 ## Kiến trúc dữ liệu — medallion
 
@@ -116,13 +130,14 @@ Makefile                lệnh tắt
 docker/jupyter/         image notebook — client mỏng
 docker/spark/           image Spark — dùng chung cho master, worker, connect server
 docker/dbt/             image dbt — dbt-core + adapter, cũng là client mỏng
-docker/hive-metastore/  image Hive Metastore độc lập (Thrift), catalog dùng chung
-docker/postgres/        script khởi tạo DB thứ hai (metastore + superset trong 1 Postgres)
+docker/hive-metastore/  image Hive Metastore độc lập (Thrift) — nơi Spark/dbt/Trino đọc-ghi bảng thật
+docker/postgres/        script khởi tạo 3 DB (metastore + unitycatalog + superset trong 1 Postgres)
 docker/trino/           cấu hình Trino — catalog delta, không cần build image riêng
 docker/superset/        image Superset — thêm driver Postgres + Trino
+docker/unity-catalog/   image Unity Catalog OSS — tầng governance (Phase 6), không phục vụ dữ liệu
 dbt/                    dự án dbt: model, test, seed, macro
 notebooks/              bài lab từng phase
-scripts/                tiện ích (tải dữ liệu, nạp bronze...)
+scripts/                tiện ích (tải dữ liệu, nạp bronze, đăng ký/ký token Unity Catalog...)
 data/                   dữ liệu thô (không commit)
 docs/roadmap.md         lộ trình 12 phase + ghi chú chi tiết từng phase
 ```
@@ -138,10 +153,11 @@ ba image còn lại của phase này (`postgres:17`, `trinodb/trino:476`,
 
 **RAM là ràng buộc thật, không phải RAM của máy bạn mà là của Docker.** Docker Desktop
 mặc định chỉ cấp ~8GB dù máy có 32GB — đủ cho Phase 0-4. Từ Phase 5, cả stack (thêm
-Postgres, Hive Metastore, Trino, Superset) đo thật khoảng **~10GB** lúc chạy đồng thời
-— **nâng trần Docker lên ít nhất 12-16GB** trước khi `make up`. Vượt trần thì kernel
-giết tiến trình (`exit 137`); với Spark, triệu chứng là lỗi shuffle rất khó hiểu
-(`MetadataFetchFailedException`) chứ không báo thẳng là hết RAM.
+Postgres, Hive Metastore, Trino, Superset, và từ Phase 6 thêm Unity Catalog — nhẹ,
+~350MB) đo thật khoảng **~9-10GB** lúc chạy đồng thời — **nâng trần Docker lên ít nhất
+12-16GB** trước khi `make up`. Vượt trần thì kernel giết tiến trình (`exit 137`); với
+Spark, triệu chứng là lỗi shuffle rất khó hiểu (`MetadataFetchFailedException`) chứ
+không báo thẳng là hết RAM.
 
 Muốn chạy rộng tay hơn: Docker Desktop → Settings → Resources → Memory, rồi nâng
 `SPARK_WORKER_MEMORY` trong `.env` và `spark.executor.memory` trong

@@ -15,6 +15,7 @@ up: ## Khởi động toàn bộ stack
 	@echo "  dbt docs      : http://localhost:8081   (sau khi chạy 'make dbt-docs')"
 	@echo "  Trino UI      : http://localhost:8082   (SHOW SCHEMAS FROM delta)"
 	@echo "  Superset      : http://localhost:8088   (admin / xem SUPERSET_ADMIN_PASSWORD trong .env)"
+	@echo "  Unity Catalog : http://localhost:8089   (governance — 'make uc-register' sau 'make dbt')"
 
 down: ## Dừng stack (giữ dữ liệu)
 	docker compose down
@@ -59,6 +60,12 @@ dbt-docs: ## Sinh tài liệu + sơ đồ lineage rồi mở ở http://localhos
 dbt-shell: ## Vào shell container dbt (chạy lệnh dbt tuỳ ý)
 	docker compose exec -w /dbt dbt bash
 
+uc-register: ## Đăng ký metadata bảng thật vào Unity Catalog (chạy sau 'make dbt')
+	docker compose exec dbt python /scripts/register_unity_catalog.py
+
+uc-token: ## Tự ký một PAT Unity Catalog mới (PRINCIPAL=admin mặc định)
+	python3 scripts/mint_uc_token.py $(or $(PRINCIPAL),admin)
+
 shell: ## Vào shell của container jupyter
 	docker compose exec jupyter bash
 
@@ -72,4 +79,4 @@ cluster: ## Kiểm tra cluster Spark: worker nào đang ALIVE
 	@docker compose exec spark-master curl -s http://localhost:8080/json/ | \
 	  python3 -c "import sys,json;d=json.load(sys.stdin);print(f\"Master {d['status']} — {d['aliveworkers']} worker ALIVE, {d['cores']} core, {d['memory']}MB\");[print('  •',w['id'],w['state'],w['cores'],'core') for w in d['workers']]"
 
-.PHONY: help up down clean logs ps data ingest dbt dbt-trap dbt-test dbt-docs dbt-shell shell spark-shell trino-shell cluster
+.PHONY: help up down clean logs ps data ingest dbt dbt-trap dbt-test dbt-docs dbt-shell uc-register uc-token shell spark-shell trino-shell cluster

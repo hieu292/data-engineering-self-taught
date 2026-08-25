@@ -171,9 +171,22 @@ Thêm dbt tests và dbt docs. **Xong khi:** `dbt build` chạy sạch, có test 
 Tầng SQL phục vụ BI, query liên kết nhiều nguồn, dashboard thật.
 **Xong khi:** analyst tưởng tượng có thể tự trả lời câu hỏi mà không cần bạn.
 
+> ✅ Đã xong. Trino đọc thẳng `_delta_log/` qua connector `delta_lake` (không qua Spark),
+> số khớp tuyệt đối với dbt. Dashboard Superset **"Lakehouse — NYC Taxi 2024"** có 2 chart
+> thật. Chi tiết ở [Phần 8](#phần-8--phase-5-chi-tiết-trino--superset).
+
 #### Phase 6 · Unity Catalog — 2 tuần
 Catalog ba tầng (catalog.schema.table), phân quyền, lineage. Phần governance mà **hầu hết người
 tự học bỏ qua** — cũng chính là phần tạo khác biệt.
+
+> ✅ Đã xong — nhưng không như kế hoạch. Catalog ba tầng và GRANT/REVOKE là thật; lineage thì
+> không (OSS không có, đó là tính năng của Databricks workspace quản lý). Kế hoạch ban đầu —
+> tháo hẳn Hive Metastore, thay bằng Unity Catalog — vỡ ở bước đầu: `unitycatalog-spark` cần
+> Unity Catalog tự vend credential S3 tạm thời cho MỌI thao tác chạm dữ liệu, và bản OSS phát
+> hành chính thức chưa nói chuyện được với MinIO trong luồng đó (đã tự tay xác nhận bằng
+> `aws-cli`: MinIO từ chối token với `InvalidTokenId`). Kiến trúc thật: Hive Metastore vẫn
+> phục vụ dữ liệu (không đổi từ Phase 5), Unity Catalog đứng cạnh làm tầng governance, nạp
+> qua REST API. Chi tiết ở [Phần 9](#phần-9--phase-6-chi-tiết-unity-catalog).
 
 #### Phase 7 · Airflow 3 — 3 tuần
 Trói tất cả thành DAG chạy tự động. Trọng tâm: **idempotency và backfill** — hai khái niệm
@@ -221,7 +234,7 @@ Gộp tất cả thành một dự án **kể được thành câu chuyện**:
 | 3 · Spark | ✅ Xong | 2026-08-23 | `notebooks/03_spark.ipynb` |
 | 4 · Medallion + dbt | ✅ Xong | 2026-08-24 | `notebooks/04_medallion_dbt.ipynb` + `dbt/` |
 | 5 · Trino + Superset | ✅ Xong | 2026-08-24 | `notebooks/05_trino_superset.ipynb` + Hive Metastore độc lập |
-| 6 · Unity Catalog | ⬜ | | |
+| 6 · Unity Catalog | ✅ Xong | 2026-08-25 | `notebooks/06_unity_catalog.ipynb` — governance, không thay được Hive Metastore |
 | 7 · Airflow | ⬜ | | |
 | 8 · Data quality | ⬜ | | |
 | 9 · Streaming | ⬜ | | |
@@ -720,6 +733,136 @@ trả lời đúng một câu: *"bảng này ở đâu"*. Nó không biết **ai
 không có khái niệm "một tổ chức, nhiều catalog" — thứ Databricks thật cần khi một công
 ty có hàng trăm team.
 
-Đó là ba thứ Unity Catalog thêm vào, và Phase 6 sẽ tháo Hive Metastore ra để thay bằng
-nó — đúng lúc bảng so sánh ở Phần 1 nói "Hive Metastore là đồ cũ" bắt đầu có ý nghĩa
-thật, không còn là một dòng lý thuyết.
+Đó là ba thứ Unity Catalog hứa thêm vào, và Phase 6 sẽ thử — dự định là tháo hẳn Hive
+Metastore ra để thay bằng nó, đúng lúc bảng so sánh ở Phần 1 nói "Hive Metastore là đồ
+cũ" bắt đầu có ý nghĩa thật. Dự định đó không thành công như hình dung — và chính cái
+KHÔNG thành công đó mới là bài học thật của phase kế tiếp.
+
+---
+
+## Phần 9 — Phase 6 chi tiết: Unity Catalog
+
+> **Sổ tay:** `notebooks/06_unity_catalog.ipynb`. Cần `make up` (build thêm
+> `unity-catalog`, ~30 giây) rồi `make uc-register` (sau khi `make dbt` đã dựng bảng
+> thật) để nạp metadata vào Unity Catalog.
+
+### Kế hoạch ban đầu, và vì sao nó đổi giữa chừng
+
+Kế hoạch lúc bắt đầu phase này giống hệt Phase 5: tháo hẳn Hive Metastore, để Spark/dbt
+đọc-ghi thẳng qua Unity Catalog — một catalog thật thay một catalog tạm, đúng tinh thần
+roadmap đã hứa từ Phần 1. Việc đầu tiên vỡ ngay khi thử `CREATE TABLE` qua catalog
+plugin `io.unitycatalog.spark.UCSingleCatalog`:
+
+```
+java.lang.NoClassDefFoundError: io/unitycatalog/client/delta/model/DeltaTableUpdate
+```
+
+Sửa được (đúng bản `unitycatalog-spark_4.1_2.13` + `delta-kernel-unitycatalog` khớp
+version Spark/Delta — xem bảng bẫy bên dưới), nhưng lỗi tiếp theo mới là lỗi thật, không
+sửa được bằng cách chọn đúng version:
+
+```
+java.nio.file.AccessDeniedException: s3://.../_delta_log: ... S3Exception: Forbidden (403)
+```
+
+Lần theo tận gốc: `unitycatalog-spark` **không bao giờ** cho Spark dùng credential MinIO
+có sẵn của chính nó khi đọc/ghi qua catalog này — nó luôn tự gọi
+`generateTemporaryPathCredentials` để Unity Catalog vend một bộ credential S3 tạm thời,
+không có cờ cấu hình nào tắt được (đọc thẳng `UCSingleCatalog.scala` trên GitHub để
+chắc). Unity Catalog trả lời được — nhưng bản OSS phát hành chính thức (v0.6.0) chưa hỗ
+trợ custom S3 endpoint trong luồng vend đó. Tự tay xác nhận bằng `aws-cli`, cùng một bộ
+access/secret key MinIO đang dùng tốt mọi nơi khác trong dự án, cộng thêm một session
+token do Unity Catalog cấp:
+
+```
+InvalidTokenId: The security token included in the request is invalid
+```
+
+MinIO kiểm signature thật và từ chối thẳng — không phải lỗi cấu hình, mà là một tính
+năng (`s3.serviceEndpoint.0`, custom S3 endpoint cho luồng vend) chưa được merge vào bản
+chính thức
+([unitycatalog/unitycatalog#890](https://github.com/unitycatalog/unitycatalog/discussions/890)).
+Không có cách nào hợp lệ để Spark đọc/ghi dữ liệu MinIO qua Unity Catalog lúc viết phase
+này.
+
+### Kiến trúc thật: hai catalog, hai vai trò
+
+```
+Spark/dbt/Trino ──(dữ liệu thật, không đổi từ Phase 5)──► hive-metastore ──► postgres
+Spark (browse only, unity.*) ──REST──► unity-catalog ──────────────────────► postgres
+scripts/register_unity_catalog.py ──REST (metadata)──► unity-catalog
+```
+
+- **Hive Metastore** (Phase 5, không đổi) vẫn là nơi Spark/dbt/Trino đọc-ghi bảng thật.
+- **Unity Catalog** đứng CẠNH, làm tầng governance: catalog ba tầng thật
+  (`unity.silver.silver_trips`), `server.authorization=enable` thật (ảnh gốc mặc định
+  TẮT — mọi request đều là admin nếu không bật), GRANT/REVOKE có tác dụng thật.
+- **`scripts/register_unity_catalog.py`** là cầu nối: đọc schema thật của từng bảng bằng
+  `DESCRIBE DETAIL` (Spark, qua Hive Metastore), rồi POST metadata đó lên REST API của
+  Unity Catalog — **không đụng một byte dữ liệu nào**, nên không cần credential vending.
+  Đây là lý do route quanh được cái lỗi ở trên: Unity Catalog chỉ cần biết "bảng nào, cột
+  gì, ở đâu", không cần tự đọc file để biết điều đó.
+- Trong Spark, `unity` là catalog THỨ HAI (không phải `defaultCatalog`) —
+  `SHOW SCHEMAS/TABLES FROM unity.*` chạy tốt (thuần metadata), còn
+  `SELECT/CREATE/INSERT` qua `unity.*` thì lỗi đúng như trên — chính là bước "sai có chủ
+  đích" của phase này.
+
+### Sáu bước
+
+- [x] **1 · Catalog ba tầng** — `SHOW CATALOGS`, `SHOW SCHEMAS FROM unity`,
+      `SHOW TABLES FROM unity.<schema>` — Hive Metastore chỉ có một catalog ngầm định,
+      Unity Catalog có thật.
+- [x] **2 · Pipeline thật không đổi** — `spark.catalog.currentCatalog()` vẫn là
+      `spark_catalog`; đối chiếu số qua `unity.*` với số Phase 4/5, khớp tuyệt đối
+      (41.169.720 → 35.613.229 → 80.523 + 1.300).
+- [x] **3 · SAI CÓ CHỦ ĐÍCH: metadata thì được, dữ liệu thì không** ⭐ — tự tay
+      `SELECT * FROM unity.gold.gold_daily_zone_revenue`, thấy `AccessDeniedException`
+      thật, hiểu đúng chuỗi nhân quả (Delta cần đọc `_delta_log` → cần credential → UC
+      vend credential → MinIO từ chối).
+- [x] **4 · Phân quyền thật** — tạo principal `analyst@lakehouse.local`, cấp
+      `SELECT` + `USE SCHEMA` trên `unity.gold`, KHÔNG cấp gì trên `unity.silver`. Token
+      analyst thấy đúng 2 bảng gold, danh sách silver rỗng — enforcement thật, không mô
+      phỏng.
+- [x] **5 · Tự ký PAT không cần Identity Provider** — `scripts/mint_uc_token.py`, dùng
+      đúng cặp khoá RSA có sẵn trong image UC (issuer `internal`). `make uc-token
+      PRINCIPAL=...` để thử với principal bất kỳ.
+- [x] **6 · Lineage — thứ KHÔNG có** — kiểm tra thẳng: UC OSS server không tự ghi lại
+      "bảng X tính từ bảng Y qua câu gì". Đó là tính năng bám vào compute của Databricks
+      workspace quản lý, không phải một phần của server OSS độc lập.
+
+### Năm cái bẫy đã sập thật khi dựng phase này
+
+| Bẫy | Triệu chứng | Nguyên nhân thật |
+|---|---|---|
+| Sai artifact `unitycatalog-spark` | `NoClassDefFoundError: DeltaTableUpdate` dù đã build cho đúng Spark 4.1 | Có HAI dòng artifact trên Maven: `unitycatalog-spark_2.13` (không khớp version Spark nào) và `unitycatalog-spark_4.1_2.13` (khớp chính xác) — dùng nhầm dòng đầu, và còn thiếu `delta-kernel-unitycatalog` (module Delta-side của UC Delta API) dù đã dùng đúng dòng artifact |
+| ~25 jar phụ thuộc bắc cầu | Tự tay `curl` từng jar như `hadoop-aws` (Phase 3) chắc chắn thiếu sót | `unitycatalog-spark` kéo theo jackson, antlr4, hadoop-client... — dùng chính `--packages` của Spark để Ivy giải đúng cây, chạy LÚC BUILD (nhắm một class không tồn tại, Ivy vẫn resolve xong trước khi báo lỗi ở bước sau) rồi copy jar ra, loại bỏ đúng những jar image gốc đã có bản mới hơn |
+| `.properties` không đọc biến môi trường | Hardcode mật khẩu Postgres/MinIO vào file commit, hoặc phải sửa file thủ công mỗi lần đổi `.env` | Java `Properties` không có `${env.VAR}` như Hadoop hay `${ENV:VAR}` như Trino — viết `entrypoint.sh` dùng `sed` điền placeholder LÚC CONTAINER KHỞI ĐỘNG, không phải lúc build |
+| Token admin "hết hạn" dù mới tạo container | Muốn bật `server.authorization=enable` thật, token admin có sẵn trong ảnh (`etc/conf/token.txt`) có `iat` cố định từ lúc ảnh được build (2025), không phải lúc container chạy | `server.access-token-timeout` mặc định 24h tính từ `iat` — nới ra 10 năm (lab học, không phải production) và tự ký token MỚI bằng đúng cặp khoá RSA của ảnh thay vì dùng token cũ |
+| `s3a://` bị Unity Catalog từ chối | `INVALID_ARGUMENT: Unsupported URI scheme: s3a` khi đăng ký bảng qua REST | Unity Catalog nghĩ theo kiểu AWS thật, chỉ nhận `s3://` — script đăng ký đổi chuỗi hiển thị (`s3a://` → `s3://`) CHỈ trong metadata gửi đi, không đụng đường dẫn thật Spark/Hive Metastore đang dùng |
+
+Bẫy đầu tiên đáng nhớ nhất vì nó lặp lại đúng bài học của `docker/spark/Dockerfile` ở
+Phase 3 (khớp version `hadoop-aws` với Hadoop bundled) — nhưng lần này với MỘT thư viện
+hoàn toàn khác, chứng minh đây không phải "nhớ một con số", mà là một thói quen: luôn
+tra artifact/version khớp CHÍNH XÁC những gì image đang chạy, không suy diễn từ một
+thành phần tương tự.
+
+### Năm câu phải trả lời được trước khi sang Phase 7
+
+1. Vì sao `SHOW TABLES FROM unity.gold` chạy được mà
+   `SELECT * FROM unity.gold.gold_daily_zone_revenue` thì không?
+2. `generateTemporaryPathCredentials` là gì, và tại sao không có cách nào tắt nó khi
+   dùng `unitycatalog-spark` với bảng EXTERNAL?
+3. Vì sao MinIO từ chối token Unity Catalog vend ra, dù access key/secret key đúng?
+4. Phân quyền của Unity Catalog trả lời "không có quyền" bằng cách nào — báo lỗi rõ
+   ràng, hay im lặng trả về danh sách rỗng? Khác nhau ở điểm nào về bảo mật?
+5. Vì sao lineage KHÔNG nằm trong Unity Catalog OSS — nó thuộc về lớp nào của kiến trúc
+   Databricks thật?
+
+### Cầu nối sang Phase 7
+
+Lakehouse giờ có đủ compute (Spark), SQL warehouse (Trino), governance (Unity Catalog)
+— nhưng mọi thứ vẫn chạy bằng tay: `make ingest`, `make dbt`, `make uc-register`, gõ
+từng lệnh một, đúng thứ tự, đúng lúc. Không ai canh giờ 9 giờ tối tự chạy pipeline,
+không ai chạy lại đúng ngày hôm qua nếu nó lỗi.
+
+Đó là việc của Airflow — Phase 7.

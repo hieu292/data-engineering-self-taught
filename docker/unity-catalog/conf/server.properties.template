@@ -1,0 +1,70 @@
+server.env=dev
+
+## Identity Provider authorization parameters
+#
+# BẬT authorization thật — mặc định ảnh gốc TẮT (server.authorization=disable),
+# nghĩa là MỌI request đều được coi là admin, không có GRANT/REVOKE nào có ý
+# nghĩa. Bật lên để bài học phân quyền của Phase 6 là thật, không phải diễn.
+#
+# Không cần một Identity Provider ngoài (Google/Entra ID) cho lab này: UC tự
+# ký JWT bằng cặp khoá RSA có sẵn trong etc/conf/ (issuer "internal"). Chỉ
+# cần khai đúng issuer/audience thì token tự ký cũng được chấp nhận —
+# server.audiences=* tắt hẳn việc kiểm tra "aud" (token demo không có claim
+# này).
+server.authorization=enable
+server.authorization-url=
+server.token-url=
+server.client-id=
+server.client-secret=
+server.redirect-port=
+
+# "internal" — issuer UC tự gán cho token nó tự ký (xem etc/conf/token.txt).
+server.allowed-issuers=internal
+server.audiences=*
+
+server.cookie-timeout=P5D
+# Mặc định 24h — token của Spark (spark-connect) sẽ hết hạn giữa chừng một
+# phiên học nếu để mặc định, và không có cách nào Spark tự refresh token
+# (chỉ đọc MỘT lần lúc khởi động, xem spark-defaults.conf). Đây là lab học,
+# không phải production: token sống dài KHÔNG phải lỗ hổng thật vì mạng nội
+# bộ Docker không lộ ra ngoài.
+server.access-token-timeout=P3650D
+
+#### AWS credential configs — cấu hình THẬT, nhưng KHÔNG dùng được với MinIO
+#
+# `unitycatalog-spark` với bảng EXTERNAL luôn gọi `generateTemporaryPathCredentials`
+# để UC tự vend credential S3 tạm thời — không có cờ nào tắt được (đã đọc
+# thẳng mã nguồn UCSingleCatalog.scala để chắc). Để trống thì lỗi thẳng "S3
+# bucket configuration not found" — không vend được gì cả.
+#
+# Khai cả BA accessKey/secretKey/sessionToken thì UC trả về ĐÚNG BA giá trị
+# đó, không gọi AWS STS thật ("Test Only... no downscoping" — comment gốc của
+# chính UC). Nhưng: token "unused" dưới đây KHÔNG phải token MinIO tự cấp —
+# MinIO kiểm signature và từ chối thẳng ("InvalidTokenId... security token
+# included in the request is invalid", đã tự tay thử bằng aws-cli để chắc).
+# UC chính thức (v0.6.0) CHƯA hỗ trợ custom S3 endpoint cho luồng vend STS
+# thật (`s3.serviceEndpoint.0` mới có ở một nhánh thử nghiệm, chưa merge —
+# github.com/unitycatalog/unitycatalog/discussions/890) — nghĩa là không có
+# cách nào hợp lệ để làm credential vending hoạt động với MinIO lúc viết bài
+# này. Giữ nguyên cấu hình "gần đúng" này CÓ CHỦ ĐÍCH: nó tạo ra đúng lỗi
+# thật (MinIO từ chối, không phải UC từ chối) cho bước "sai có chủ đích" của
+# Phase 6 — xem docs/roadmap.md Phần 9 và notebooks/06_unity_catalog.ipynb.
+aws.masterRoleArn=
+aws.accessKey=
+aws.secretKey=
+aws.region=
+
+s3.bucketPath.0=s3://__MINIO_BUCKET__
+s3.region.0=us-east-1
+s3.awsRoleArn.0=
+s3.accessKey.0=__MINIO_ROOT_USER__
+s3.secretKey.0=__MINIO_ROOT_PASSWORD__
+s3.sessionToken.0=unused
+
+adls.storageAccountName.0=
+adls.tenantId.0=
+adls.clientId.0=
+adls.clientSecret.0=
+
+gcs.bucketPath.0=
+gcs.jsonKeyFilePath.0=
